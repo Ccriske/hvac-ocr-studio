@@ -1,12 +1,19 @@
-name: Build Windows HVAC OCR Portable App
+name: Build & Publish Windows Desktop App
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    paths:
+      - 'hvac_ocr_desktop.py'
+      - 'hvac_pdf_ocr.py'
+      - '.github/workflows/build-windows-exe.yml'
+
+permissions:
+  contents: write
 
 jobs:
-  build-windows-exe:
+  build-and-release:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -26,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pypdf pypdfium2 pytesseract pillow
 
-      - name: Build portable Windows folder (--onedir reduces AV false positives)
+      - name: Build portable Windows app (--onedir for IT/AV compatibility)
         shell: pwsh
         run: |
           pyinstaller --noconfirm --onedir --windowed `
@@ -34,8 +41,21 @@ jobs:
             --add-data "C:\Program Files\Tesseract-OCR;tesseract" `
             hvac_ocr_desktop.py
 
-      - name: Upload portable Windows app artifact
-        uses: actions/upload-artifact@v4
+      - name: Package portable folder into zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist\HVAC_Plan_OCR" -DestinationPath "HVAC_OCR_Studio_Windows.zip" -Force
+
+      - name: Publish to GitHub Releases (latest)
+        uses: softprops/action-gh-release@v2
         with:
-          name: HVAC_Plan_OCR-Windows-Portable
-          path: dist/HVAC_Plan_OCR/
+          tag_name: latest
+          name: HVAC OCR Studio (Windows Portable)
+          body: |
+            Portable Windows desktop app for fast, multi-core OCR on large HVAC plan & spec sets.
+
+            **How to use:**
+            1. Download `HVAC_OCR_Studio_Windows.zip` below.
+            2. Right-click -> **Extract All**.
+            3. Open the extracted `HVAC_Plan_OCR` folder and run `HVAC_Plan_OCR.exe` (Python and Tesseract are already bundled).
+          files: HVAC_OCR_Studio_Windows.zip
+          make_latest: true
