@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC OCR Studio</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .drop-active { border-color: #2563eb !important; background-color: #eff6ff !important; }
+    mark { background-color: #fef08a; color: #0f172a; padding: 0 2px; border-radius: 2px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
+
+  <!-- Minimal Top Bar -->
+  <header class="h-14 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-20">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="w-7 h-7 rounded-md bg-slate-900 text-white flex items-center justify-center text-xs font-semibold tracking-tight shrink-0">
+        HV
+      </div>
+      <span class="text-sm font-semibold text-slate-900 tracking-tight truncate">HVAC OCR Studio</span>
+      <span id="headerFilePill" class="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-xs text-slate-600 bg-slate-100 truncate max-w-[260px]"></span>
+    </div>
+
+    <div class="flex items-center gap-2 shrink-0">
+      <button id="btnNewFile" type="button" class="hidden px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-md transition">
+        Open PDF
+      </button>
+      <div id="exportGroup" class="hidden items-center gap-1.5">
+        <button id="btnDownloadPdf" type="button" class="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 hover:bg-blue-700 text-white transition">
+          Download PDF
+        </button>
+        <button id="btnDownloadCsv" type="button" class="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition">
+          CSV
+        </button>
+        <button id="btnDownloadJson" type="button" class="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition">
+          JSON
+        </button>
+        <button id="btnDownloadTxt" type="button" class="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition">
+          TXT
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Slim Progress Strip -->
+  <div id="progressStrip" class="hidden bg-white border-b border-slate-200 px-4 sm:px-6 py-2.5">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between text-xs mb-1.5">
+          <span id="progressLabel" class="text-slate-700 font-medium truncate">Preparing document...</span>
+          <span id="progressMeta" class="mono text-slate-500 ml-3 shrink-0">0%</span>
+        </div>
+        <div class="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+          <div id="progressBar" class="h-full bg-blue-600 transition-all duration-200" style="width: 0%"></div>
+        </div>
+      </div>
+      <button id="btnCancel" type="button" class="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-rose-700 hover:bg-rose-50 rounded-md border border-slate-200 transition shrink-0">
+        Cancel
+      </button>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-4 right-4 z-50 hidden max-w-sm rounded-lg bg-slate-900 text-white px-3.5 py-2.5 text-xs font-medium shadow-lg"></div>
+
+  <!-- Hidden File Input & Work Canvas -->
+  <input id="pdfInput" type="file" accept="application/pdf,.pdf" class="hidden" />
+  <canvas id="workCanvas" class="hidden"></canvas>
+
+  <!-- Empty State (Initial Screen) -->
+  <section id="emptyState" class="flex-1 flex items-center justify-center p-6">
+    <div class="w-full max-w-lg text-center space-y-6">
+      <div class="space-y-2">
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Make HVAC plans &amp; specs searchable</h1>
+        <p class="text-sm text-slate-500">
+          Runs locally in your browser using parallel OCR. Automatically classifies floor plans, schedules, title blocks, control diagrams, and sequences of operations.
+        </p>
+      </div>
+
+      <div id="dropZone" class="bg-white border-2 border-dashed border-slate-300 rounded-xl p-10 cursor-pointer hover:border-blue-500 hover:bg-slate-50/50 transition">
+        <svg class="w-9 h-9 mx-auto text-slate-400 mb-3" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z" />
+        </svg>
+        <p class="text-sm font-medium text-slate-800">Drop a PDF here to start immediately</p>
+        <p class="text-xs text-slate-500 mt-1">No files leave your computer</p>
+        <div class="mt-5">
+          <span class="inline-flex items-center px-4 py-2 rounded-md bg-slate-900 text-white text-xs font-medium hover:bg-slate-800 transition">
+            Choose PDF File
+          </span>
+        </div>
+      </div>
+
+      <div class="text-xs text-slate-500">
+        Want to test it first?
+        <button id="btnLoadSample" type="button" class="text-blue-600 hover:text-blue-700 font-medium underline underline-offset-2 ml-1">
+          Load 4-page sample HVAC package
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Active Workbench (Shown once a file is loaded) -->
+  <section id="workbench" class="hidden flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+
+    <!-- Left Sidebar: Navigation & Equipment Index -->
+    <aside class="lg:col-span-3 space-y-5">
+
+      <!-- Sheet Categories -->
+      <div class="bg-white rounded-lg border border-slate-200 p-2">
+        <p class="px-2.5 pt-1.5 pb-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Sheets &amp; Links</p>
+        <nav id="categoryNav" class="space-y-0.5 text-xs">
+          <button type="button" data-cat="all" class="cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium bg-slate-100 text-slate-900">
+            <span>All Pages</span>
+            <span id="cntAll" class="mono text-slate-500">0</span>
+          </button>
+          <button type="button" data-cat="floorplan" class="cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium text-slate-600 hover:bg-slate-50">
+            <span>Floor Plans</span>
+            <span id="cntFloorplan" class="mono text-slate-400">0</span>
+          </button>
+          <button type="button" data-cat="control_diagram" class="cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium text-slate-600 hover:bg-slate-50">
+            <span>Control Diagrams</span>
+            <span id="cntControl" class="mono text-slate-400">0</span>
+          </button>
+          <button type="button" data-cat="sequence_of_ops" class="cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium text-slate-600 hover:bg-slate-50">
+            <span>Sequence of Ops</span>
+            <span id="cntSoo" class="mono text-slate-400">0</span>
+          </button>
+          <button type="button" data-cat="all_diagrams" class="cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium text-slate-600 hover:bg-slate-50">
+            <span>All Diagrams</span>
+            <span id="cntAllDiagrams" class="mono text-slate-400">0</span>
+          </button>
+          <button type="button" data-cat="schedule" class="cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium text-slate-600 hover:bg-slate-50">
+            <span>Schedules</span>
+            <span id="cntSchedules" class="mono text-slate-400">0</span>
+          </button>
+        </nav>
+      </div>
+
+      <!-- Equipment Cross-Reference Index -->
+      <div class="bg-white rounded-lg border border-slate-200 p-3 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Equipment Links</p>
+          <span id="cntTags" class="mono text-[11px] text-slate-400">0</span>
+        </div>
+        <div id="equipList" class="space-y-1.5 max-h-[360px] overflow-y-auto pr-0.5 text-xs">
+          <p class="text-slate-400 py-2">Extracting tags...</p>
+        </div>
+      </div>
+
+      <!-- CSI Specs Quick List -->
+      <div class="bg-white rounded-lg border border-slate-200 p-3 space-y-2">
+        <p class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Div 23 Spec Sections</p>
+        <div id="csiList" class="flex flex-wrap gap-1.5 text-xs">
+          <span class="text-slate-400">&mdash;</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace: Inspector -->
+    <div class="lg:col-span-9 bg-white rounded-lg border border-slate-200 flex flex-col min-h-[620px]">
+
+      <!-- Workspace Toolbar -->
+      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+        <!-- Segmented View Switcher -->
+        <div class="inline-flex rounded-md bg-slate-100 p-0.5 text-xs">
+          <button type="button" data-view="sheet" class="view-btn px-3 py-1.5 rounded font-medium bg-white text-slate-900 shadow-sm">Sheet &amp; Text</button>
+          <button type="button" data-view="schedules" class="view-btn px-3 py-1.5 rounded font-medium text-slate-600 hover:text-slate-900">Schedules</button>
+          <button type="button" data-view="titleblocks" class="view-btn px-3 py-1.5 rounded font-medium text-slate-600 hover:text-slate-900">Title Blocks</button>
+          <button type="button" data-view="hierarchy" class="view-btn px-3 py-1.5 rounded font-medium text-slate-600 hover:text-slate-900">Font Hierarchy</button>
+        </div>
+
+        <!-- Search + Copy -->
+        <div class="flex items-center gap-2 flex-1 sm:flex-initial justify-end">
+          <input id="searchBox" type="search" placeholder="Search text, tags, CFM..." class="w-full sm:w-56 px-2.5 py-1.5 text-xs rounded-md border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500" />
+          <button id="btnCopyText" type="button" class="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 transition shrink-0">
+            Copy
+          </button>
+        </div>
+      </div>
+
+      <!-- Page Strip (for quick page switching) -->
+      <div id="pageBar" class="px-4 py-2 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between gap-3 text-xs">
+        <div class="flex items-center gap-2 min-w-0">
+          <button id="btnPrevPage" type="button" class="px-2 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-40">&larr;</button>
+          <span id="pageIndicator" class="mono text-slate-700 font-medium shrink-0">Page 1 / 1</span>
+          <button id="btnNextPage" type="button" class="px-2 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-40">&rarr;</button>
+          <span id="activeSheetTitle" class="text-slate-600 truncate ml-1"></span>
+        </div>
+        <span id="activeSheetMeta" class="text-slate-400 shrink-0 hidden sm:inline"></span>
+      </div>
+
+      <!-- Main Content Body -->
+      <div id="workspaceBody" class="flex-1 p-4 overflow-y-auto">
+        <!-- Sheet & Text split view -->
+        <div id="viewSheet" class="space-y-4">
+          <div class="bg-slate-100 rounded-lg border border-slate-200 p-2 flex items-center justify-center min-h-[260px] max-h-[420px] overflow-hidden">
+            <canvas id="previewCanvas" class="max-w-full max-h-[400px] h-auto"></canvas>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-xs font-medium text-slate-500">Extracted Text</span>
+              <span id="sheetCharCount" class="mono text-[11px] text-slate-400"></span>
+            </div>
+            <pre id="sheetTextPre" class="p-3.5 rounded-lg border border-slate-200 bg-slate-50 mono text-xs text-slate-800 whitespace-pre-wrap break-words leading-relaxed max-h-[260px] overflow-y-auto"></pre>
+          </div>
+        </div>
+
+        <!-- Secondary Views (Schedules, Title Blocks, Font Hierarchy) -->
+        <div id="viewList" class="hidden space-y-3"></div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    (function () {
+      'use strict';
+
+      if (window.pdfjsLib) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+
+      // Regex extractors
+      const EQUIPMENT_TAG_RE = /\b(AHU|RTU|VAV|FCU|EF|SF|RF|CH|CT|WP|HW|CW|HRV|ERV|DOAS|MAU|CU|ACU|HP|UH|EUH|GUH|CRAC|CRAH|FSD|FD|SD|VFD|FTR|CUH|B|P)-\d{1,4}[A-Z]?\b/gi;
+      const CAPACITY_RE = /\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*(?:CFM|GPM|MBH|BTUH|BTU\/H|TONS?|HP|ESP|WC|IN\.?\s*W\.?G\.?|FLA|MCA|MOP)\b/gi;
+      const CSI_DIV23_RE = /\b(?:SECTION\s+)?(23\s?\d{2}\s?\d{2}(?:\.\d{2})?)\b/gi;
+      const SHEET_NO_RE = /\b([MH]-?\d{1,3}(?:\.\d{1,2})?[A-Z]?)\b/g;
+
+      const CAT_LABELS = {
+        floorplan: 'Floor Plan',
+        control_diagram: 'Control Diagram',
+        sequence_of_ops: 'Sequence of Ops',
+        diagram: 'Diagram',
+        schedule: 'Schedule',
+        spec: 'Spec'
+      };
+
+      const state = {
+        fileName: '',
+        pdfBytes: null,
+        pdfDocProxy: null,
+        searchablePdfBytes: null,
+        isRunning: false,
+        cancelRequested: false,
+        activeCategory: 'all',
+        activeView: 'sheet',
+        selectedPageNum: 1,
+        scheduler: null,
+        workerCount: Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 4)),
+        results: []
+      };
+
+      const el = {
+        emptyState: document.getElementById('emptyState'),
+        workbench: document.getElementById('workbench'),
+        dropZone: document.getElementById('dropZone'),
+        pdfInput: document.getElementById('pdfInput'),
+        workCanvas: document.getElementById('workCanvas'),
+        headerFilePill: document.getElementById('headerFilePill'),
+        btnNewFile: document.getElementById('btnNewFile'),
+        btnLoadSample: document.getElementById('btnLoadSample'),
+        exportGroup: document.getElementById('exportGroup'),
+        btnDownloadPdf: document.getElementById('btnDownloadPdf'),
+        btnDownloadCsv: document.getElementById('btnDownloadCsv'),
+        btnDownloadJson: document.getElementById('btnDownloadJson'),
+        btnDownloadTxt: document.getElementById('btnDownloadTxt'),
+        progressStrip: document.getElementById('progressStrip'),
+        progressLabel: document.getElementById('progressLabel'),
+        progressMeta: document.getElementById('progressMeta'),
+        progressBar: document.getElementById('progressBar'),
+        btnCancel: document.getElementById('btnCancel'),
+        cntAll: document.getElementById('cntAll'),
+        cntFloorplan: document.getElementById('cntFloorplan'),
+        cntControl: document.getElementById('cntControl'),
+        cntSoo: document.getElementById('cntSoo'),
+        cntAllDiagrams: document.getElementById('cntAllDiagrams'),
+        cntSchedules: document.getElementById('cntSchedules'),
+        cntTags: document.getElementById('cntTags'),
+        equipList: document.getElementById('equipList'),
+        csiList: document.getElementById('csiList'),
+        searchBox: document.getElementById('searchBox'),
+        btnCopyText: document.getElementById('btnCopyText'),
+        btnPrevPage: document.getElementById('btnPrevPage'),
+        btnNextPage: document.getElementById('btnNextPage'),
+        pageIndicator: document.getElementById('pageIndicator'),
+        activeSheetTitle: document.getElementById('activeSheetTitle'),
+        activeSheetMeta: document.getElementById('activeSheetMeta'),
+        viewSheet: document.getElementById('viewSheet'),
+        viewList: document.getElementById('viewList'),
+        previewCanvas: document.getElementById('previewCanvas'),
+        sheetCharCount: document.getElementById('sheetCharCount'),
+        sheetTextPre: document.getElementById('sheetTextPre'),
+        toast: document.getElementById('toast')
+      };
+
+      let toastTimer = null;
+      function showToast(msg) {
+        el.toast.textContent = msg;
+        el.toast.classList.remove('hidden');
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => el.toast.classList.add('hidden'), 3200);
+      }
+
+      function sanitizeWinAnsi(str) {
+        return (str || '').replace(/[^\x20-\x7E]/g, ' ').trim();
+      }
+
+      function escapeHtml(str) {
+        return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+
+      function extractEntities(text) {
+        const uniq = (re, grp = 0) => {
+          const s = new Set();
+          let m;
+          const r = new RegExp(re.source, re.flags);
+          while ((m = r.exec(text)) !== null) {
+            const v = (m[grp] || m[0]).replace(/\s+/g, ' ').trim().toUpperCase();
+            if (v) s.add(v);
+          }
+          return Array.from(s).sort();
+        };
+        return {
+          tags: uniq(EQUIPMENT_TAG_RE, 0),
+          capacities: uniq(CAPACITY_RE, 0),
+          csi: uniq(CSI_DIV23_RE, 1),
+          sheets: uniq(SHEET_NO_RE, 1)
+        };
+      }
+
+      function classifyFontTier(pt) {
+        if (pt >= 18) return 'title';
+        if (pt >= 12) return 'heading';
+        if (pt >= 7) return 'callout';
+        return 'fine';
+      }
+
+      function analyzeStructure(lines, canvasW, canvasH, pageW, pageH, fullText, sheets) {
+        const scaleY = pageH / Math.max(1, canvasH);
+        const isLandscape = pageW > pageH;
+        const fontLines = [];
+        const titleBlockLines = [];
+        const scheduleLines = [];
+
+        for (const ln of (lines || [])) {
+          const txt = (ln.text || '').trim();
+          if (!txt || !ln.bbox) continue;
+          const hPt = Math.max(4, (ln.bbox.y1 - ln.bbox.y0) * scaleY);
+          const tier = classifyFontTier(hPt);
+          const xNorm = ln.bbox.x0 / Math.max(1, canvasW);
+          const yNorm = ln.bbox.y0 / Math.max(1, canvasH);
+          const inTb = (isLandscape && xNorm >= 0.78) || (isLandscape && xNorm >= 0.65 && yNorm >= 0.78);
+
+          fontLines.push({ text: txt, fontPt: Number(hPt.toFixed(1)), tier });
+          if (inTb) titleBlockLines.push(txt);
+          if (!inTb && /\b(SCHEDULE|CFM|GPM|TONS?|MBH|ESP|HP|AHU-\d|RTU-\d|VAV-\d|EF-\d)\b/i.test(txt)) {
+            scheduleLines.push(txt);
+          }
+        }
+
+        const upper = fullText.toUpperCase();
+        const cats = new Set();
+        const isFloor = /\b(FLOOR\s*PLAN|HVAC\s*PLAN|MECHANICAL\s*PLAN|DUCTWORK\s*PLAN|PIPING\s*PLAN|ROOF\s*PLAN)\b/.test(upper) || sheets.some((s) => /^M-?1\d{2}/.test(s));
+        const isCtrl = /\b(CONTROL\s*DIAGRAM|CONTROLS\s*DIAGRAM|DDC\s*DIAGRAM|BAS\s*DIAGRAM|POINTS\s*LIST|WIRING\s*DIAGRAM)\b/.test(upper) || sheets.some((s) => /^M-?[78]\d{2}/.test(s));
+        const isSoo = /\b(SEQUENCE\s+OF\s+OPERATIONS?|SEQUENCES\s+OF\s+OPERATION|CONTROL\s+SEQUENCE|23\s?09\s?93)\b/.test(upper);
+        const isDiag = isCtrl || /\b(FLOW\s*DIAGRAM|SCHEMATIC|RISER\s*DIAGRAM|AIRFLOW\s*DIAGRAM|HYDRONIC\s*DIAGRAM|DIAGRAM)\b/.test(upper) || sheets.some((s) => /^M-?5\d{2}/.test(s));
+        const isSched = /\b(EQUIPMENT\s*SCHEDULE|AHU\s*SCHEDULE|RTU\s*SCHEDULE|VAV\s*SCHEDULE|FAN\s*SCHEDULE|MECHANICAL\s*SCHEDULES?)\b/.test(upper) || sheets.some((s) => /^M-?6\d{2}/.test(s));
+        const isSpec = /\b(PART\s+1\s*[-–]\s*GENERAL|SECTION\s+23\s?\d{2}\s?\d{2})\b/.test(upper);
+
+        if (isFloor) cats.add('floorplan');
+        if (isCtrl) cats.add('control_diagram');
+        if (isSoo) cats.add('sequence_of_ops');
+        if (isDiag && !isCtrl) cats.add('diagram');
+        if (isSched) cats.add('schedule');
+        if (isSpec && !isSoo) cats.add('spec');
+        if (cats.size === 0) cats.add(isLandscape ? 'floorplan' : 'spec');
+
+        const titleCand = fontLines.find((l) => l.tier === 'title' || l.tier === 'heading');
+        const inferredTitle = titleCand ? titleCand.text : (fullText.split('\n')[0] || 'Untitled Sheet').slice(0, 72);
+
+        return {
+          categories: Array.from(cats),
+          isAnyDiagram: isDiag,
+          inferredTitle,
+          fontLines,
+          titleBlockLines,
+          scheduleLines
+        };
+      }
+
+      // Warm reusable parallel Tesseract worker pool (using fast LSTM model for 2-4x speedup)
+      async function getScheduler(neededWorkers) {
+        if (state.scheduler) return state.scheduler;
+        const count = Math.max(1, Math.min(state.workerCount, neededWorkers));
+        const scheduler = Tesseract.createScheduler();
+        const createOne = async () => {
+          try {
+            return await Tesseract.createWorker('eng', 1, {
+              langPath: 'https://tessdata.projectnaptha.com/4.0.0_fast'
+            });
+          } catch (_) {
+            return await Tesseract.createWorker('eng', 1);
+          }
+        };
+        const workers = await Promise.all(Array.from({ length: count }, createOne));
+        workers.forEach((w) => scheduler.addWorker(w));
+        state.scheduler = scheduler;
+        return scheduler;
+      }
+
+      function addPdfInternalLink(pdfDoc, sourcePage, targetPage, rect) {
+        const { PDFName, PDFArray } = window.PDFLib;
+        const ctx = pdfDoc.context;
+        const linkAnnot = ctx.obj({
+          Type: PDFName.of('Annot'),
+          Subtype: PDFName.of('Link'),
+          Rect: rect,
+          Border: [0, 0, 0],
+          Dest: ctx.obj([targetPage.ref, PDFName.of('Fit')])
+        });
+        const ref = ctx.register(linkAnnot);
+        let annots = sourcePage.node.lookup(PDFName.of('Annots'));
+        if (!annots) {
+          annots = ctx.obj([]);
+          sourcePage.node.set(PDFName.of('Annots'), annots);
+        }
+        if (annots instanceof PDFArray) annots.push(ref);
+      }
+
+      function buildClickableIndexPage(outPdf, font, fontBold, rgb, results, pageRefs) {
+        const idxPage = outPdf.insertPage(0, [612, 792]);
+        const draw = (txt, x, y, size, bold = false, color = rgb(0.08, 0.1, 0.15)) => {
+          idxPage.drawText(sanitizeWinAnsi(txt), { x, y, size, font: bold ? fontBold : font, color });
+        };
+        draw('HVAC PLAN & SPEC INDEX', 42, 744, 17, true, rgb(0.06, 0.09, 0.16));
+        draw(`${state.fileName}  |  ${results.length} pages`, 42, 725, 9, false, rgb(0.4, 0.45, 0.52));
+
+        let y = 694;
+        const groups = [
+          { title: 'FLOOR PLANS', items: results.filter((r) => r.categories.includes('floorplan')) },
+          { title: 'CONTROL DIAGRAMS', items: results.filter((r) => r.categories.includes('control_diagram')) },
+          { title: 'SEQUENCE OF OPERATIONS', items: results.filter((r) => r.categories.includes('sequence_of_ops')) },
+          { title: 'ALL DIAGRAMS', items: results.filter((r) => r.isAnyDiagram) },
+          { title: 'SCHEDULES', items: results.filter((r) => r.categories.includes('schedule')) }
+        ];
+
+        for (const g of groups) {
+          if (y < 90) break;
+          draw(`${g.title} (${g.items.length})`, 42, y, 10.5, true, rgb(0.15, 0.38, 0.92));
+          y -= 15;
+          if (!g.items.length) {
+            draw('None detected', 52, y, 8.5, false, rgb(0.55, 0.6, 0.65));
+            y -= 15;
+            continue;
+          }
+          for (const item of g.items.slice(0, 6)) {
+            if (y < 70) break;
+            const targetPage = pageRefs[results.indexOf(item)];
+            const tag = item.sheets[0] ? `[${item.sheets[0]}] ` : '';
+            draw(`Page ${item.pageNumber + 1}  ${tag}${item.inferredTitle.slice(0, 62)}`, 52, y, 9, false, rgb(0.1, 0.32, 0.78));
+            if (targetPage) addPdfInternalLink(outPdf, idxPage, targetPage, [48, y - 2, 560, y + 10]);
+            y -= 14;
+          }
+          y -= 8;
+        }
+      }
+
+      async function processPdfBuffer(arrayBuffer, fileName) {
+        if (state.isRunning) return;
+        const t0 = performance.now();
+
+        state.fileName = fileName;
+        state.pdfBytes = new Uint8Array(arrayBuffer);
+        state.searchablePdfBytes = null;
+        state.results = [];
+        state.activeCategory = 'all';
+        state.activeView = 'sheet';
+        state.selectedPageNum = 1;
+        state.isRunning = true;
+        state.cancelRequested = false;
+
+        // Switch UI to active workbench immediately
+        el.emptyState.classList.add('hidden');
+        el.workbench.classList.remove('hidden');
+        el.btnNewFile.classList.remove('hidden');
+        el.exportGroup.classList.add('hidden');
+        el.exportGroup.classList.remove('flex');
+        el.progressStrip.classList.remove('hidden');
+        el.headerFilePill.textContent = fileName;
+        el.headerFilePill.classList.remove('hidden');
+        updateProgress(4, 'Reading PDF pages...');
+
+        try {
+          const pdfDoc = await pdfjsLib.getDocument({ data: state.pdfBytes.slice() }).promise;
+          state.pdfDocProxy = pdfDoc;
+          const total = pdfDoc.numPages;
+
+          // Step 1: Fast scan for native selectable text + render pages that need OCR
+          const pageMeta = [];
+          const ocrJobs = [];
+
+          for (let p = 1; p <= total; p++) {
+            if (state.cancelRequested) throw new Error('Cancelled.');
+            const page = await pdfDoc.getPage(p);
+            const vp1 = page.getViewport({ scale: 1.0 });
+            const tc = await page.getTextContent();
+            const nativeText = tc.items.map((it) => it.str).join(' ').trim();
+            const needsOcr = nativeText.length < 80;
+
+            const info = {
+              pageNum: p,
+              pageW: vp1.width,
+              pageH: vp1.height,
+              nativeText,
+              textItems: tc.items,
+              needsOcr,
+              jpgBytes: null,
+              ocrCanvasUrl: null,
+              tbCanvasUrl: null,
+              renderW: 0,
+              renderH: 0
+            };
+
+            if (needsOcr) {
+              // Fast optimized resolution: ~165 DPI, capped at 2600px on long edge
+              const longest = Math.max(vp1.width, vp1.height);
+              const scale = Math.min(165 / 72.0, 2600 / longest);
+              const rvp = page.getViewport({ scale });
+              const w = Math.round(rvp.width);
+              const h = Math.round(rvp.height);
+
+              el.workCanvas.width = w;
+              el.workCanvas.height = h;
+              const ctx = el.workCanvas.getContext('2d');
+              ctx.filter = 'none';
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, w, h);
+              await page.render({ canvasContext: ctx, viewport: rvp }).promise;
+
+              // Save crisp color/original JPEG for PDF embedding
+              const jpgUrl = el.workCanvas.toDataURL('image/jpeg', 0.84);
+              info.jpgBytes = Uint8Array.from(atob(jpgUrl.split(',')[1]), (c) => c.charCodeAt(0));
+              info.renderW = w;
+              info.renderH = h;
+
+              // Fast GPU-accelerated grayscale + contrast for OCR canvas
+              const ocrCanvas = document.createElement('canvas');
+              ocrCanvas.width = w;
+              ocrCanvas.height = h;
+              const oCtx = ocrCanvas.getContext('2d');
+              oCtx.filter = 'grayscale(100%) contrast(135%)';
+              oCtx.drawImage(el.workCanvas, 0, 0);
+              info.ocrCanvasUrl = ocrCanvas.toDataURL('image/png');
+
+              // Prepare 90° CW rotated right-edge title block crop for landscape sheets
+              if (vp1.width > vp1.height) {
+                const cropX = Math.floor(w * 0.80);
+                const cropW = w - cropX;
+                const tbCanvas = document.createElement('canvas');
+                tbCanvas.width = h;
+                tbCanvas.height = cropW;
+                const tbCtx = tbCanvas.getContext('2d');
+                tbCtx.fillStyle = '#ffffff';
+                tbCtx.fillRect(0, 0, tbCanvas.width, tbCanvas.height);
+                tbCtx.translate(h, 0);
+                tbCtx.rotate(Math.PI / 2);
+                tbCtx.drawImage(ocrCanvas, cropX, 0, cropW, h, 0, 0, cropW, h);
+                info.tbCanvasUrl = tbCanvas.toDataURL('image/png');
+                info.tbCropX = cropX;
+                info.tbCropH = h;
+              }
+              ocrJobs.push(info);
+            }
+
+            pageMeta.push(info);
+            updateProgress(5 + Math.round((p / total) * 20), `Prepared page ${p} of ${total}...`);
+          }
+
+          // Render page 1 preview right away while OCR runs
+          renderPreviewPage(1);
+
+          // Step 2: Run parallel OCR across worker pool
+          const ocrOutputByPage = new Map();
+          if (ocrJobs.length > 0) {
+            updateProgress(28, `Running parallel OCR (${Math.min(state.workerCount, ocrJobs.length)} workers)...`);
+            const scheduler = await getScheduler(ocrJobs.length);
+            let completed = 0;
+
+            await Promise.all(
+              ocrJobs.map(async (job) => {
+                if (state.cancelRequested) return;
+                const mainRes = await scheduler.addJob('recognize', job.ocrCanvasUrl);
+                let tbRes = null;
+                if (job.tbCanvasUrl && !state.cancelRequested) {
+                  tbRes = await scheduler.addJob('recognize', job.tbCanvasUrl);
+                }
+                ocrOutputByPage.set(job.pageNum, { main: mainRes.data, tb: tbRes ? tbRes.data : null });
+                completed++;
+                const pct = 28 + Math.round((completed / ocrJobs.length) * 60);
+                updateProgress(pct, `OCR finished ${completed} of ${ocrJobs.length} scanned page(s)...`);
+              })
+            );
+          }
+
+          if (state.cancelRequested) throw new Error('Cancelled.');
+
+          // Step 3: Assemble searchable PDF (preserving native pages directly for instant speed!)
+          updateProgress(90, 'Building searchable PDF & cross-reference links...');
+          const { PDFDocument, StandardFonts, rgb, degrees } = window.PDFLib;
+          const srcPdf = await PDFDocument.load(state.pdfBytes);
+          const outPdf = await PDFDocument.create();
+          const helvetica = await outPdf.embedFont(StandardFonts.Helvetica);
+          const helveticaBold = await outPdf.embedFont(StandardFonts.HelveticaBold);
+          const createdPages = [];
+
+          for (const info of pageMeta) {
+            let finalText = info.nativeText;
+            let lines = [];
+            let rotatedTbLines = [];
+
+            if (!info.needsOcr) {
+              const [copied] = await outPdf.copyPages(srcPdf, [info.pageNum - 1]);
+              outPdf.addPage(copied);
+              createdPages.push(copied);
+              lines = info.textItems
+                .filter((it) => (it.str || '').trim())
+                .map((it) => ({
+                  text: it.str,
+                  bbox: {
+                    x0: (it.transform && it.transform[4]) || 0,
+                    y0: info.pageH - ((it.transform && it.transform[5]) || 0),
+                    x1: ((it.transform && it.transform[4]) || 0) + 80,
+                    y1: info.pageH - ((it.transform && it.transform[5]) || 0) + Math.max(8, Math.abs(it.height || 10))
+                  }
+                }));
+            } else {
+              const img = await outPdf.embedJpg(info.jpgBytes);
+              const outPage = outPdf.addPage([info.pageW, info.pageH]);
+              outPage.drawImage(img, { x: 0, y: 0, width: info.pageW, height: info.pageH });
+              createdPages.push(outPage);
+
+              const ocr = ocrOutputByPage.get(info.pageNum);
+              if (ocr && ocr.main) {
+                finalText = (ocr.main.text || '').trim();
+                lines = ocr.main.lines || [];
+                const sx = info.pageW / info.renderW;
+                const sy = info.pageH / info.renderH;
+
+                for (const w of (ocr.main.words || [])) {
+                  const clean = sanitizeWinAnsi(w.text);
+                  if (!clean || !w.bbox) continue;
+                  try {
+                    outPage.drawText(clean, {
+                      x: Math.max(0, w.bbox.x0 * sx),
+                      y: Math.max(0, info.pageH - w.bbox.y1 * sy),
+                      size: Math.max(4, Math.min((w.bbox.y1 - w.bbox.y0) * sy * 0.88, 60)),
+                      font: helvetica,
+                      color: rgb(0, 0, 0),
+                      opacity: 0
+                    });
+                  } catch (_) {}
+                }
+
+                // Merge 90° CW rotated title block
+                if (ocr.tb) {
+                  rotatedTbLines = (ocr.tb.lines || [])
+                    .map((l) => (l.text || '').trim())
+                    .filter((t) => t.replace(/[^A-Za-z0-9]/g, '').length >= 3);
+                  if (rotatedTbLines.length) {
+                    finalText = (finalText + '\n\n[TITLE BLOCK]\n' + rotatedTbLines.join('\n')).trim();
+                    for (const w of (ocr.tb.words || [])) {
+                      const clean = sanitizeWinAnsi(w.text);
+                      if (!clean || !w.bbox) continue;
+                      const origX = info.tbCropX + w.bbox.y0;
+                      const origYBottom = info.tbCropH - w.bbox.x0;
+                      try {
+                        outPage.drawText(clean, {
+                          x: Math.max(0, origX * sx),
+                          y: Math.max(0, info.pageH - origYBottom * sy),
+                          size: Math.max(4, Math.min((w.bbox.y1 - w.bbox.y0) * sx * 0.85, 48)),
+                          font: helvetica,
+                          color: rgb(0, 0, 0),
+                          rotate: degrees(90),
+                          opacity: 0
+                        });
+                      } catch (_) {}
+                    }
+                  }
+                }
+              }
+            }
+
+            const entities = extractEntities(finalText);
+            const struct = analyzeStructure(
+              lines,
+              info.needsOcr ? info.renderW : info.pageW,
+              info.needsOcr ? info.renderH : info.pageH,
+              info.pageW,
+              info.pageH,
+              finalText,
+              entities.sheets
+            );
+            if (rotatedTbLines.length) {
+              struct.titleBlockLines = Array.from(new Set([...rotatedTbLines, ...struct.titleBlockLines]));
+            }
+
+            state.results.push({
+              pageNumber: info.pageNum,
+              ocrApplied: info.needsOcr,
+              text: finalText,
+              ...entities,
+              ...struct
+            });
+          }
+
+          if (state.results.length > 0) {
+            buildClickableIndexPage(outPdf, helvetica, helveticaBold, rgb, state.results, createdPages);
+          }
+
+          state.searchablePdfBytes = await outPdf.save();
+          const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+
+          el.progressStrip.classList.add('hidden');
+          el.exportGroup.classList.remove('hidden');
+          el.exportGroup.classList.add('flex');
+
+          renderSidebar();
+          renderWorkspace();
+          showToast(`Done in ${elapsed}s — ${total} page(s) searchable.`);
+        } catch (err) {
+          el.progressStrip.classList.add('hidden');
+          showToast(err.message || 'Processing failed.');
+        } finally {
+          state.isRunning = false;
+        }
+      }
+
+      function updateProgress(pct, label) {
+        el.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+        el.progressMeta.textContent = `${Math.round(pct)}%`;
+        el.progressLabel.textContent = label;
+      }
+
+      async function renderPreviewPage(pageNum) {
+        if (!state.pdfDocProxy) return;
+        const page = await state.pdfDocProxy.getPage(pageNum);
+        const vp = page.getViewport({ scale: 1.0 });
+        const scale = Math.min(1.6, 900 / vp.width);
+        const svp = page.getViewport({ scale });
+        el.previewCanvas.width = svp.width;
+        el.previewCanvas.height = svp.height;
+        await page.render({ canvasContext: el.previewCanvas.getContext('2d'), viewport: svp }).promise;
+      }
+
+      function getFilteredPages() {
+        const q = el.searchBox.value.trim().toLowerCase();
+        return state.results.filter((r) => {
+          if (state.activeCategory === 'all_diagrams' && !r.isAnyDiagram) return false;
+          if (state.activeCategory !== 'all' && state.activeCategory !== 'all_diagrams' && !r.categories.includes(state.activeCategory)) return false;
+          if (q && !r.text.toLowerCase().includes(q) && !r.inferredTitle.toLowerCase().includes(q)) return false;
+          return true;
+        });
+      }
+
+      function renderSidebar() {
+        const res = state.results;
+        el.cntAll.textContent = String(res.length);
+        el.cntFloorplan.textContent = String(res.filter((r) => r.categories.includes('floorplan')).length);
+        el.cntControl.textContent = String(res.filter((r) => r.categories.includes('control_diagram')).length);
+        el.cntSoo.textContent = String(res.filter((r) => r.categories.includes('sequence_of_ops')).length);
+        el.cntAllDiagrams.textContent = String(res.filter((r) => r.isAnyDiagram).length);
+        el.cntSchedules.textContent = String(res.filter((r) => r.categories.includes('schedule')).length);
+
+        // Equipment Cross-Reference Links
+        const tagMap = new Map();
+        for (const r of res) {
+          for (const t of r.tags) {
+            if (!tagMap.has(t)) tagMap.set(t, []);
+            tagMap.get(t).push(r);
+          }
+        }
+        const tags = Array.from(tagMap.keys()).sort();
+        el.cntTags.textContent = String(tags.length);
+
+        el.equipList.innerHTML = tags.length
+          ? tags
+              .map((tag) => {
+                const links = tagMap
+                  .get(tag)
+                  .map((r) => {
+                    const lbl = CAT_LABELS[r.categories[0]] || 'Page';
+                    const sh = r.sheets[0] ? ` ${r.sheets[0]}` : ` p.${r.pageNumber}`;
+                    return `<button type="button" data-jump-page="${r.pageNumber}" data-jump-tag="${escapeHtml(tag)}" class="jump-link text-[11px] text-blue-600 hover:underline">${lbl}${escapeHtml(sh)}</button>`;
+                  })
+                  .join('<span class="text-slate-300 mx-1">&middot;</span>');
+                return `
+                  <div class="p-2 rounded-md border border-slate-100 bg-slate-50/70">
+                    <div class="mono font-medium text-slate-900">${escapeHtml(tag)}</div>
+                    <div class="mt-0.5 leading-snug">${links}</div>
+                  </div>`;
+              })
+              .join('')
+          : '<p class="text-slate-400 py-1">No equipment tags found.</p>';
+
+        // CSI Div 23
+        const csi = Array.from(new Set(res.flatMap((r) => r.csi))).sort();
+        el.csiList.innerHTML = csi.length
+          ? csi
+              .map((c) => `<button type="button" data-filter="${escapeHtml(c)}" class="filter-chip mono px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700">${escapeHtml(c)}</button>`)
+              .join('')
+          : '<span class="text-slate-400">&mdash;</span>';
+      }
+
+      function renderWorkspace() {
+        const filtered = getFilteredPages();
+        const q = el.searchBox.value.trim();
+        const hiRe = q ? new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi') : null;
+
+        // Ensure selected page is valid
+        if (filtered.length && !filtered.some((r) => r.pageNumber === state.selectedPageNum)) {
+          state.selectedPageNum = filtered[0].pageNumber;
+        }
+        const curIdx = filtered.findIndex((r) => r.pageNumber === state.selectedPageNum);
+        const current = curIdx >= 0 ? filtered[curIdx] : null;
+
+        el.pageIndicator.textContent = filtered.length ? `Page ${current.pageNumber} (${curIdx + 1}/${filtered.length})` : '0 pages';
+        el.btnPrevPage.disabled = curIdx <= 0;
+        el.btnNextPage.disabled = curIdx < 0 || curIdx >= filtered.length - 1;
+        el.activeSheetTitle.textContent = current ? current.inferredTitle : '';
+        el.activeSheetMeta.textContent = current
+          ? `${current.categories.map((c) => CAT_LABELS[c] || c).join(' · ')} ${current.ocrApplied ? '· OCR' : '· Native Text'}`
+          : '';
+
+        if (state.activeView === 'sheet') {
+          el.viewSheet.classList.remove('hidden');
+          el.viewList.classList.add('hidden');
+          if (current) {
+            renderPreviewPage(current.pageNumber);
+            let txtHtml = escapeHtml(current.text || '(No text extracted)');
+            if (hiRe) txtHtml = txtHtml.replace(hiRe, '<mark>$1</mark>');
+            el.sheetTextPre.innerHTML = txtHtml;
+            el.sheetCharCount.textContent = `${current.text.length} chars`;
+          } else {
+            el.sheetTextPre.textContent = 'No pages match the current filter.';
+            el.sheetCharCount.textContent = '';
+          }
+          return;
+        }
+
+        el.viewSheet.classList.add('hidden');
+        el.viewList.classList.remove('hidden');
+
+        if (!filtered.length) {
+          el.viewList.innerHTML = '<p class="text-xs text-slate-400 py-8 text-center">No matching pages.</p>';
+          return;
+        }
+
+        if (state.activeView === 'schedules') {
+          const items = filtered.filter((r) => r.scheduleLines.length || r.categories.includes('schedule'));
+          el.viewList.innerHTML = items.length
+            ? items
+                .map((r) => `
+                  <div class="rounded-lg border border-slate-200 overflow-hidden">
+                    <div class="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+                      <span class="font-medium text-slate-800">Page ${r.pageNumber} &mdash; ${escapeHtml(r.inferredTitle)}</span>
+                      <button type="button" data-jump-page="${r.pageNumber}" class="jump-link text-blue-600 hover:underline">Open Sheet</button>
+                    </div>
+                    <div class="p-3 space-y-1 mono text-xs text-slate-700">
+                      ${(r.scheduleLines.length ? r.scheduleLines : r.text.split('\n').filter(Boolean)).map((l) => `<div>${escapeHtml(l)}</div>`).join('')}
+                    </div>
+                  </div>`)
+                .join('')
+            : '<p class="text-xs text-slate-400 py-8 text-center">No schedules detected in this set.</p>';
+        } else if (state.activeView === 'titleblocks') {
+          el.viewList.innerHTML = filtered
+            .map((r) => `
+              <div class="rounded-lg border border-slate-200 overflow-hidden">
+                <div class="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+                  <span class="font-medium text-slate-800">Page ${r.pageNumber} ${r.sheets[0] ? '· ' + escapeHtml(r.sheets[0]) : ''}</span>
+                  <button type="button" data-jump-page="${r.pageNumber}" class="jump-link text-blue-600 hover:underline">Open Sheet</button>
+                </div>
+                <div class="p-3 space-y-1 mono text-xs text-slate-700">
+                  ${r.titleBlockLines.length ? r.titleBlockLines.map((l) => `<div>${escapeHtml(l)}</div>`).join('') : '<span class="text-slate-400 font-sans">No title block strip detected on this page.</span>'}
+                </div>
+              </div>`)
+            .join('');
+        } else if (state.activeView === 'hierarchy') {
+          el.viewList.innerHTML = filtered
+            .map((r) => `
+              <div class="rounded-lg border border-slate-200 overflow-hidden">
+                <div class="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+                  <span class="font-medium text-slate-800">Page ${r.pageNumber} &mdash; Font-Size Classification</span>
+                  <button type="button" data-jump-page="${r.pageNumber}" class="jump-link text-blue-600 hover:underline">Open Sheet</button>
+                </div>
+                <div class="p-3 divide-y divide-slate-100 text-xs max-h-64 overflow-y-auto">
+                  ${r.fontLines.slice(0, 35).map((l) => `
+                    <div class="py-1 flex items-baseline gap-2.5">
+                      <span class="mono text-[10px] uppercase text-slate-400 w-24 shrink-0">${l.tier} · ${l.fontPt}pt</span>
+                      <span class="mono text-slate-700 break-words">${escapeHtml(l.text)}</span>
+                    </div>`).join('') || '<span class="text-slate-400">No lines classified.</span>'}
+                </div>
+              </div>`)
+            .join('');
+        }
+      }
+
+      // Built-in 4-page sample package (vertical 90° title blocks + Floor Plan, Schedule, Control Diagram, SOO)
+      async function loadSamplePackage() {
+        const { PDFDocument } = window.PDFLib;
+        const pdfDoc = await PDFDocument.create();
+
+        async function addRasterPage(wPx, hPx, drawFn, wPt, hPt) {
+          const c = document.createElement('canvas');
+          c.width = wPx;
+          c.height = hPx;
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, wPx, hPx);
+          drawFn(ctx, wPx, hPx);
+          const png = await new Promise((res) => c.toBlob((b) => b.arrayBuffer().then((buf) => res(new Uint8Array(buf))), 'image/png'));
+          const img = await pdfDoc.embedPng(png);
+          const pg = pdfDoc.addPage([wPt, hPt]);
+          pg.drawImage(img, { x: 0, y: 0, width: wPt, height: hPt });
+        }
+
+        function drawVertTitleBlock(ctx, w, h, sheetNo, sheetTitle) {
+          const tbX = Math.round(w * 0.82);
+          ctx.strokeStyle = '#111827';
+          ctx.lineWidth = 4;
+          ctx.strokeRect(30, 30, w - 60, h - 60);
+          ctx.beginPath();
+          ctx.moveTo(tbX, 30);
+          ctx.lineTo(tbX, h - 30);
+          ctx.stroke();
+          ctx.save();
+          ctx.translate(tbX + 55, h - 70);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillStyle = '#111827';
+          ctx.font = 'bold 34px sans-serif';
+          ctx.fillText(`SHEET ${sheetNo}  |  ${sheetTitle}`, 0, 0);
+          ctx.font = '25px sans-serif';
+          ctx.fillText('PROJECT: NORTH TOWER HVAC   SCALE: 1/8" = 1\'-0"   DATE: 2026-11-23', 0, 56);
+          ctx.restore();
+        }
+
+        await addRasterPage(1800, 1200, (ctx, w, h) => {
+          drawVertTitleBlock(ctx, w, h, 'M-101', 'FLOOR PLAN');
+          ctx.fillStyle = '#111827';
+          ctx.font = 'bold 46px sans-serif';
+          ctx.fillText('MECHANICAL FLOOR PLAN - LEVEL 1', 70, 115);
+          ctx.font = '28px sans-serif';
+          ctx.fillText('AHU-1   4500 CFM   MAIN MECHANICAL ROOM', 70, 260);
+          ctx.fillText('VAV-101   650 CFM   12x10 DUCT   CONFERENCE', 70, 340);
+          ctx.fillText('VAV-102   850 CFM   14x10 DUCT   OPEN OFFICE', 70, 420);
+          ctx.fillText('EF-2   1200 CFM   ROOF EXHAUST FAN', 70, 500);
+          ctx.fillText('RTU-1   15 TONS   6000 CFM   ROOFTOP', 70, 580);
+        }, 792, 528);
+
+        await addRasterPage(1800, 1200, (ctx, w, h) => {
+          drawVertTitleBlock(ctx, w, h, 'M-601', 'SCHEDULES');
+          ctx.fillStyle = '#111827';
+          ctx.font = 'bold 46px sans-serif';
+          ctx.fillText('MECHANICAL EQUIPMENT SCHEDULE', 70, 115);
+          ctx.font = '26px sans-serif';
+          ctx.fillText('AHU-1    AIR HANDLER      4500 CFM    2.5 IN.WG   45 GPM    10 HP', 70, 260);
+          ctx.fillText('RTU-1    ROOFTOP UNIT     6000 CFM    1.8 IN.WG   15 TONS   15 HP', 70, 340);
+          ctx.fillText('VAV-101  VAV TERMINAL      650 CFM    0.5 IN.WG   24 MBH', 70, 420);
+          ctx.fillText('VAV-102  VAV TERMINAL      850 CFM    0.5 IN.WG   32 MBH', 70, 500);
+          ctx.fillText('EF-2     EXHAUST FAN      1200 CFM    0.75 IN.WG  1 HP', 70, 580);
+        }, 792, 528);
+
+        await addRasterPage(1800, 1200, (ctx, w, h) => {
+          drawVertTitleBlock(ctx, w, h, 'M-701', 'CONTROL DIAGRAM');
+          ctx.fillStyle = '#111827';
+          ctx.font = 'bold 46px sans-serif';
+          ctx.fillText('AHU-1 & VAV DDC CONTROL DIAGRAM', 70, 115);
+          ctx.font = '26px sans-serif';
+          ctx.fillText('AHU-1 SUPPLY FAN VFD-1 -> DUCT STATIC PRESSURE (1.5 IN.WG)', 70, 260);
+          ctx.fillText('AHU-1 CHW VALVE -> 45 GPM MODULATING CONTROL (55F)', 70, 340);
+          ctx.fillText('VAV-101 & VAV-102 -> BACNET MS/TP CONTROLLERS', 70, 420);
+          ctx.fillText('EF-2 INTERLOCKED WITH AHU-1 OCCUPIED STATUS', 70, 500);
+          ctx.fillText('RTU-1 ECONOMIZER DAMPER & CO2 VENTILATION', 70, 580);
+        }, 792, 528);
+
+        await addRasterPage(1275, 1650, (ctx) => {
+          ctx.fillStyle = '#111827';
+          ctx.font = 'bold 38px sans-serif';
+          ctx.fillText('SECTION 23 09 93', 90, 125);
+          ctx.fillText('SEQUENCE OF OPERATIONS FOR HVAC CONTROLS', 90, 178);
+          ctx.font = '25px sans-serif';
+          ctx.fillText('1.01 RELATED: SECTION 23 05 00 AND SECTION 23 74 13.', 90, 290);
+          ctx.fillText('2.01 AHU-1: START SUPPLY FAN VIA VFD-1 AT 4500 CFM.', 90, 380);
+          ctx.fillText('2.02 CHW VALVE (45 GPM) MAINTAINS 55F DISCHARGE AIR.', 90, 440);
+          ctx.fillText('2.03 START EF-2 WHEN AHU-1 IS PROVEN RUNNING.', 90, 500);
+          ctx.fillText('3.01 MODULATE VAV-101 (650 CFM) AND VAV-102 (850 CFM).', 90, 590);
+          ctx.fillText('3.02 RTU-1 (15 TONS, 6000 CFM) STAGES COOLING ON CALL.', 90, 650);
+        }, 612, 792);
+
+        const bytes = await pdfDoc.save();
+        await processPdfBuffer(bytes.buffer, 'sample_hvac_4page_package.pdf');
+      }
+
+      function triggerDownload(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      function baseStem() {
+        return (state.fileName || 'hvac_document').replace(/\.pdf$/i, '');
+      }
+
+      // Wire events
+      el.dropZone.addEventListener('click', () => el.pdfInput.click());
+      el.btnNewFile.addEventListener('click', () => el.pdfInput.click());
+      el.pdfInput.addEventListener('change', async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        await processPdfBuffer(await file.arrayBuffer(), file.name);
+        el.pdfInput.value = '';
+      });
+
+      el.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); el.dropZone.classList.add('drop-active'); });
+      el.dropZone.addEventListener('dragleave', () => el.dropZone.classList.remove('drop-active'));
+      el.dropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        el.dropZone.classList.remove('drop-active');
+        const file = e.dataTransfer.files && e.dataTransfer.files[0];
+        if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+          showToast('Please drop a PDF file.');
+          return;
+        }
+        await processPdfBuffer(await file.arrayBuffer(), file.name);
+      });
+
+      el.btnLoadSample.addEventListener('click', loadSamplePackage);
+      el.btnCancel.addEventListener('click', () => {
+        state.cancelRequested = true;
+        showToast('Cancelling...');
+      });
+
+      el.searchBox.addEventListener('input', renderWorkspace);
+
+      el.btnPrevPage.addEventListener('click', () => {
+        const f = getFilteredPages();
+        const i = f.findIndex((r) => r.pageNumber === state.selectedPageNum);
+        if (i > 0) { state.selectedPageNum = f[i - 1].pageNumber; renderWorkspace(); }
+      });
+
+      el.btnNextPage.addEventListener('click', () => {
+        const f = getFilteredPages();
+        const i = f.findIndex((r) => r.pageNumber === state.selectedPageNum);
+        if (i >= 0 && i < f.length - 1) { state.selectedPageNum = f[i + 1].pageNumber; renderWorkspace(); }
+      });
+
+      document.querySelectorAll('.cat-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          state.activeCategory = btn.getAttribute('data-cat') || 'all';
+          document.querySelectorAll('.cat-btn').forEach((b) => {
+            const active = b === btn;
+            b.className = active
+              ? 'cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium bg-slate-100 text-slate-900'
+              : 'cat-btn w-full flex items-center justify-between px-2.5 py-2 rounded-md font-medium text-slate-600 hover:bg-slate-50';
+          });
+          renderWorkspace();
+        });
+      });
+
+      document.querySelectorAll('.view-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          state.activeView = btn.getAttribute('data-view') || 'sheet';
+          document.querySelectorAll('.view-btn').forEach((b) => {
+            const active = b === btn;
+            b.className = active
+              ? 'view-btn px-3 py-1.5 rounded font-medium bg-white text-slate-900 shadow-sm'
+              : 'view-btn px-3 py-1.5 rounded font-medium text-slate-600 hover:text-slate-900';
+          });
+          renderWorkspace();
+        });
+      });
+
+      document.addEventListener('click', (e) => {
+        const jump = e.target.closest('.jump-link');
+        if (jump) {
+          const pg = parseInt(jump.getAttribute('data-jump-page'), 10);
+          const tag = jump.getAttribute('data-jump-tag');
+          if (pg) state.selectedPageNum = pg;
+          state.activeCategory = 'all';
+          state.activeView = 'sheet';
+          if (tag) el.searchBox.value = tag;
+          document.querySelectorAll('.view-btn').forEach((b) => {
+            const active = b.getAttribute('data-view') === 'sheet';
+            b.className = active
+              ? 'view-btn px-3 py-1.5 rounded font-medium bg-white text-slate-900 shadow-sm'
+              : 'view-btn px-3 py-1.5 rounded font-medium text-slate-600 hover:text-slate-900';
+          });
+          renderWorkspace();
+          return;
+        }
+        const chip = e.target.closest('.filter-chip');
+        if (chip) {
+          const val = chip.getAttribute('data-filter') || '';
+          el.searchBox.value = el.searchBox.value === val ? '' : val;
+          renderWorkspace();
+        }
+      });
+
+      el.btnCopyText.addEventListener('click', async () => {
+        if (!state.results.length) return;
+        const full = state.results.map((r) => `=== PAGE ${r.pageNumber} ===\n${r.text}`).join('\n\n');
+        try {
+          await navigator.clipboard.writeText(full);
+        } catch (_) {
+          const ta = document.createElement('textarea');
+          ta.value = full;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+        }
+        showToast('Copied extracted text.');
+      });
+
+      el.btnDownloadPdf.addEventListener('click', () => {
+        if (state.searchablePdfBytes) {
+          triggerDownload(new Blob([state.searchablePdfBytes], { type: 'application/pdf' }), `${baseStem()}_searchable.pdf`);
+        }
+      });
+
+      el.btnDownloadTxt.addEventListener('click', () => {
+        const txt = state.results.map((r) => `=== PAGE ${r.pageNumber} ===\n${r.text}\n`).join('\n');
+        triggerDownload(new Blob([txt], { type: 'text/plain;charset=utf-8' }), `${baseStem()}_text.txt`);
+      });
+
+      el.btnDownloadJson.addEventListener('click', () => {
+        const payload = {
+          source_file: state.fileName,
+          total_pages: state.results.length,
+          links: {
+            floorplans: state.results.filter((r) => r.categories.includes('floorplan')).map((r) => ({ page: r.pageNumber, sheets: r.sheets, title: r.inferredTitle })),
+            control_diagrams: state.results.filter((r) => r.categories.includes('control_diagram')).map((r) => ({ page: r.pageNumber, sheets: r.sheets, title: r.inferredTitle })),
+            sequence_of_operations: state.results.filter((r) => r.categories.includes('sequence_of_ops')).map((r) => ({ page: r.pageNumber, sheets: r.sheets, title: r.inferredTitle })),
+            all_diagrams: state.results.filter((r) => r.isAnyDiagram).map((r) => ({ page: r.pageNumber, sheets: r.sheets, title: r.inferredTitle })),
+            schedules: state.results.filter((r) => r.categories.includes('schedule')).map((r) => ({ page: r.pageNumber, sheets: r.sheets, title: r.inferredTitle }))
+          },
+          pages: state.results
+        };
+        triggerDownload(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), `${baseStem()}_extracted.json`);
+      });
+
+      el.btnDownloadCsv.addEventListener('click', () => {
+        const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+        const header = ['page_number', 'categories', 'inferred_title', 'sheet_numbers', 'equipment_tags', 'capacities', 'csi_sections', 'title_block'];
+        const rows = state.results.map((r) =>
+          [r.pageNumber, r.categories.join('; '), r.inferredTitle, r.sheets.join('; '), r.tags.join('; '), r.capacities.join('; '), r.csi.join('; '), r.titleBlockLines.join(' | ')]
+            .map(esc)
+            .join(',')
+        );
+        triggerDownload(new Blob([[header.join(','), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `${baseStem()}_extracted.csv`);
+      });
+    })();
+  </script>
+</body>
+</html>

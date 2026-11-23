@@ -244,6 +244,23 @@ def ocr_single_page(
             "in_title_block": in_tb,
         })
 
+    # Second-pass 90 deg clockwise OCR on right-edge vertical title block for landscape sheets
+    if is_landscape:
+        crop_x = int(img_w * 0.80)
+        tb_crop = processed.crop((crop_x, 0, img_w, img_h))
+        tb_rot = tb_crop.rotate(-90, expand=True)  # -90 in Pillow = 90 deg clockwise
+        tb_txt = pytesseract.image_to_string(tb_rot, lang=lang, config=f"--oem {oem} --psm 6").strip()
+        tb_lines = [ln.strip() for ln in tb_txt.splitlines() if len(re.sub(r"[^A-Za-z0-9]", "", ln)) >= 3]
+        if tb_lines:
+            extracted_text = (extracted_text + "\n\n[TITLE BLOCK - ROTATED 90 DEG CW]\n" + "\n".join(tb_lines)).strip()
+            for ln in tb_lines:
+                line_records.append({
+                    "text": ln,
+                    "font_pt": 14.0,
+                    "tier": "heading",
+                    "in_title_block": True,
+                })
+
     return page_index, pdf_bytes, extracted_text, line_records
 
 
