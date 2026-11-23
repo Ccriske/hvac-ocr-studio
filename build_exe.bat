@@ -17,6 +17,9 @@ if exist "%TESS_DIR%\tesseract.exe" (
     echo Bundling Tesseract OCR from: %TESS_DIR%
     pyinstaller --noconfirm --onedir --windowed ^
         --name "HVAC_OCR_Studio" ^
+        --collect-all webview ^
+        --collect-all pypdfium2 ^
+        --hidden-import webview.platforms.edgechromium ^
         --add-data "site;site" ^
         --add-data "%TESS_DIR%;tesseract" ^
         hvac_ocr_desktop.py
@@ -24,6 +27,9 @@ if exist "%TESS_DIR%\tesseract.exe" (
     echo [WARNING] Tesseract-OCR not found in Program Files.
     pyinstaller --noconfirm --onedir --windowed ^
         --name "HVAC_OCR_Studio" ^
+        --collect-all webview ^
+        --collect-all pypdfium2 ^
+        --hidden-import webview.platforms.edgechromium ^
         --add-data "site;site" ^
         hvac_ocr_desktop.py
 )
