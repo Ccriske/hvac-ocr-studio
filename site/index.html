@@ -439,6 +439,130 @@
         if (annots instanceof PDFArray) annots.push(ref);
       }
 
+      // Embed true hierarchical PDF Bookmarks (/Outlines) for Bluebeam Revu, Acrobat, Chrome & Edge
+      function buildNativePdfBookmarks(outPdf, results, pageRefs) {
+        const { PDFName, PDFString, PDFNumber } = window.PDFLib;
+        const ctx = outPdf.context;
+
+        const sections = [
+          { title: 'Floor Plans', items: results.filter((r) => r.categories.includes('floorplan')) },
+          { title: 'Schedules', items: results.filter((r) => r.categories.includes('schedule')) },
+          { title: 'Control Diagrams', items: results.filter((r) => r.categories.includes('control_diagram')) },
+          { title: 'Sequence of Operations', items: results.filter((r) => r.categories.includes('sequence_of_ops')) },
+          { title: 'All Diagrams & Schematics', items: results.filter((r) => r.isAnyDiagram) },
+          { title: 'Specifications (Div 23)', items: results.filter((r) => r.categories.includes('spec')) }
+        ].filter((sec) => sec.items.length > 0);
+
+        const tagMap = new Map();
+        for (const r of results) {
+          for (const t of r.tags) {
+            if (!tagMap.has(t)) tagMap.set(t, []);
+            tagMap.get(t).push(r);
+          }
+        }
+        if (tagMap.size > 0) {
+          const eqItems = Array.from(tagMap.keys()).sort().map((tag) => ({
+            tag,
+            pages: tagMap.get(tag)
+          }));
+          sections.push({ title: 'Equipment Cross-Reference', eqItems });
+        }
+        if (!sections.length) return;
+
+        const outlineRootRef = ctx.nextRef();
+        const topRefs = [];
+
+        function makeNode(title, targetPage, parentRef, childNodes) {
+          const ref = ctx.nextRef();
+          const dict = {
+            Title: PDFString.of(sanitizeWinAnsi(title)),
+            Parent: parentRef
+          };
+          if (targetPage) {
+            dict.Dest = ctx.obj([targetPage.ref, PDFName.of('Fit')]);
+          }
+          if (childNodes && childNodes.length > 0) {
+            for (let i = 0; i < childNodes.length; i++) {
+              if (i > 0) childNodes[i].dict.set(PDFName.of('Prev'), childNodes[i - 1].ref);
+              if (i < childNodes.length - 1) childNodes[i].dict.set(PDFName.of('Next'), childNodes[i + 1].ref);
+            }
+            dict.First = childNodes[0].ref;
+            dict.Last = childNodes[childNodes.length - 1].ref;
+            dict.Count = PDFNumber.of(childNodes.length);
+          }
+          const pdfDict = ctx.obj(dict);
+          ctx.assign(ref, pdfDict);
+          return { ref, dict: pdfDict };
+        }
+
+        for (const sec of sections) {
+          const secRef = ctx.nextRef();
+          let children = [];
+          let firstTarget = null;
+          if (sec.eqItems) {
+            firstTarget = pageRefs[results.indexOf(sec.eqItems[0].pages[0])];
+            children = sec.eqItems.map(({ tag, pages }) => {
+              const tRef = ctx.nextRef();
+              const subChildren = pages.map((r) => {
+                const lbl = CAT_LABELS[r.categories[0]] || 'Sheet';
+                const sh = r.sheets[0] ? ` (${r.sheets[0]})` : '';
+                return makeNode(`${lbl}${sh} - p.${r.pageNumber}`, pageRefs[results.indexOf(r)], tRef, []);
+              });
+              const tDict = ctx.obj({
+                Title: PDFString.of(sanitizeWinAnsi(tag)),
+                Parent: secRef,
+                Dest: ctx.obj([pageRefs[results.indexOf(pages[0])].ref, PDFName.of('Fit')]),
+                First: subChildren[0].ref,
+                Last: subChildren[subChildren.length - 1].ref,
+                Count: PDFNumber.of(subChildren.length)
+              });
+              for (let i = 0; i < subChildren.length; i++) {
+                if (i > 0) subChildren[i].dict.set(PDFName.of('Prev'), subChildren[i - 1].ref);
+                if (i < subChildren.length - 1) subChildren[i].dict.set(PDFName.of('Next'), subChildren[i + 1].ref);
+              }
+              ctx.assign(tRef, tDict);
+              return { ref: tRef, dict: tDict };
+            });
+          } else {
+            firstTarget = pageRefs[results.indexOf(sec.items[0])];
+            children = sec.items.map((r) => {
+              const sh = r.sheets[0] ? `[${r.sheets[0]}] ` : '';
+              return makeNode(`${sh}${r.inferredTitle.slice(0, 60)} (p.${r.pageNumber})`, pageRefs[results.indexOf(r)], secRef, []);
+            });
+          }
+
+          for (let i = 0; i < children.length; i++) {
+            if (i > 0) children[i].dict.set(PDFName.of('Prev'), children[i - 1].ref);
+            if (i < children.length - 1) children[i].dict.set(PDFName.of('Next'), children[i + 1].ref);
+          }
+          const secDict = ctx.obj({
+            Title: PDFString.of(`${sec.title} (${children.length})`),
+            Parent: outlineRootRef,
+            Dest: ctx.obj([firstTarget.ref, PDFName.of('Fit')]),
+            First: children[0].ref,
+            Last: children[children.length - 1].ref,
+            Count: PDFNumber.of(children.length)
+          });
+          ctx.assign(secRef, secDict);
+          topRefs.push({ ref: secRef, dict: secDict });
+        }
+
+        for (let i = 0; i < topRefs.length; i++) {
+          if (i > 0) topRefs[i].dict.set(PDFName.of('Prev'), topRefs[i - 1].ref);
+          if (i < topRefs.length - 1) topRefs[i].dict.set(PDFName.of('Next'), topRefs[i + 1].ref);
+        }
+
+        const rootDict = ctx.obj({
+          Type: PDFName.of('Outlines'),
+          First: topRefs[0].ref,
+          Last: topRefs[topRefs.length - 1].ref,
+          Count: PDFNumber.of(topRefs.length)
+        });
+        ctx.assign(outlineRootRef, rootDict);
+        outPdf.catalog.set(PDFName.of('Outlines'), outlineRootRef);
+        outPdf.catalog.set(PDFName.of('PageMode'), PDFName.of('UseOutlines'));
+      }
+
       function buildClickableIndexPage(outPdf, font, fontBold, rgb, results, pageRefs) {
         const idxPage = outPdf.insertPage(0, [612, 792]);
         const draw = (txt, x, y, size, bold = false, color = rgb(0.08, 0.1, 0.15)) => {
@@ -646,9 +770,9 @@
                   }
                 }));
             } else {
-              const img = await outPdf.embedJpg(info.jpgBytes);
-              const outPage = outPdf.addPage([info.pageW, info.pageH]);
-              outPage.drawImage(img, { x: 0, y: 0, width: info.pageW, height: info.pageH });
+              // LOSSLESS: keep original crisp CAD vector page untouched & overlay ONLY invisible OCR text
+              const [outPage] = await outPdf.copyPages(srcPdf, [info.pageNum - 1]);
+              outPdf.addPage(outPage);
               createdPages.push(outPage);
 
               const ocr = ocrOutputByPage.get(info.pageNum);
@@ -726,7 +850,7 @@
           }
 
           if (state.results.length > 0) {
-            buildClickableIndexPage(outPdf, helvetica, helveticaBold, rgb, state.results, createdPages);
+            buildNativePdfBookmarks(outPdf, state.results, createdPages);
           }
 
           state.searchablePdfBytes = await outPdf.save();
@@ -1027,9 +1151,77 @@
         return (state.fileName || 'hvac_document').replace(/\.pdf$/i, '');
       }
 
+      // Desktop pywebview native bridge (exact same UI, powered by native multi-core C++ OCR)
+      function isDesktopNative() {
+        return Boolean(window.pywebview && window.pywebview.api);
+      }
+
+      window.__onNativeProgress = function (pct, msg) {
+        updateProgress(pct, msg);
+      };
+
+      async function hydrateFromNativeReport(rep) {
+        if (!rep || !rep.pdf_base64) return;
+        const bin = atob(rep.pdf_base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        state.fileName = rep.file_name || 'document.pdf';
+        state.pdfBytes = bytes;
+        state.searchablePdfBytes = bytes;
+        state.pdfDocProxy = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        state.results = (rep.pages || []).map((pg) => ({
+          pageNumber: pg.page_number,
+          ocrApplied: pg.ocr_applied,
+          text: pg.text || '',
+          tags: pg.equipment_tags || [],
+          capacities: pg.capacities || [],
+          csi: pg.csi_sections || [],
+          sheets: pg.sheet_numbers || [],
+          categories: pg.categories || ['spec'],
+          isAnyDiagram: Boolean(pg.is_any_diagram),
+          inferredTitle: pg.inferred_title || 'Untitled Sheet',
+          fontLines: [],
+          titleBlockLines: pg.title_block_lines || [],
+          scheduleLines: pg.schedule_lines || []
+        }));
+        state.activeCategory = 'all';
+        state.activeView = 'sheet';
+        state.selectedPageNum = 1;
+        el.headerFilePill.textContent = `${state.fileName} · Native Engine`;
+        el.headerFilePill.classList.remove('hidden');
+        el.progressStrip.classList.add('hidden');
+        el.exportGroup.classList.remove('hidden');
+        el.exportGroup.classList.add('flex');
+        renderSidebar();
+        renderWorkspace();
+        showToast(`Ready — ${state.results.length} page(s) searchable with native PDF bookmarks.`);
+      }
+
+      async function openFileSmart() {
+        if (isDesktopNative()) {
+          el.emptyState.classList.add('hidden');
+          el.workbench.classList.remove('hidden');
+          el.btnNewFile.classList.remove('hidden');
+          el.progressStrip.classList.remove('hidden');
+          updateProgress(5, 'Select a PDF to process with native multi-core OCR...');
+          const rep = await window.pywebview.api.pick_and_process_pdf();
+          if (rep) {
+            await hydrateFromNativeReport(rep);
+          } else {
+            el.progressStrip.classList.add('hidden');
+            if (!state.results.length) {
+              el.workbench.classList.add('hidden');
+              el.emptyState.classList.remove('hidden');
+            }
+          }
+          return;
+        }
+        el.pdfInput.click();
+      }
+
       // Wire events
-      el.dropZone.addEventListener('click', () => el.pdfInput.click());
-      el.btnNewFile.addEventListener('click', () => el.pdfInput.click());
+      el.dropZone.addEventListener('click', openFileSmart);
+      el.btnNewFile.addEventListener('click', openFileSmart);
       el.pdfInput.addEventListener('change', async (e) => {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
@@ -1138,7 +1330,12 @@
         showToast('Copied extracted text.');
       });
 
-      el.btnDownloadPdf.addEventListener('click', () => {
+      el.btnDownloadPdf.addEventListener('click', async () => {
+        if (isDesktopNative()) {
+          const res = await window.pywebview.api.save_searchable_pdf();
+          if (res && res.saved) showToast(`Saved to ${res.path}`);
+          return;
+        }
         if (state.searchablePdfBytes) {
           triggerDownload(new Blob([state.searchablePdfBytes], { type: 'application/pdf' }), `${baseStem()}_searchable.pdf`);
         }
