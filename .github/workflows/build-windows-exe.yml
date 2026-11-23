@@ -1,0 +1,37 @@
+name: Build Windows HVAC OCR Portable App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Tesseract OCR
+        shell: pwsh
+        run: choco install tesseract -y
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pypdf pypdfium2 pytesseract pillow
+      - name: Build portable Windows folder
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --onedir --windowed `
+            --name "HVAC_Plan_OCR" `
+            --add-data "C:\Program Files\Tesseract-OCR;tesseract" `
+            hvac_ocr_desktop.py
+      - name: Upload portable Windows app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HVAC_Plan_OCR-Windows-Portable
+          path: dist/HVAC_Plan_OCR/
+
