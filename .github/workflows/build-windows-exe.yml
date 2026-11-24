@@ -32,16 +32,14 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pypdf pypdfium2 pytesseract pillow reportlab pywebview
+          pip install pyinstaller pypdf pypdfium2 pytesseract pillow reportlab
 
-      - name: Build unified Windows desktop app (bundles site/index.html, pywebview & Tesseract)
+      - name: Build unified Windows desktop app (zero .NET/pythonnet dependencies)
         shell: pwsh
         run: |
           pyinstaller --noconfirm --onedir --windowed `
             --name "HVAC_OCR_Studio" `
-            --collect-all webview `
             --collect-all pypdfium2 `
-            --hidden-import webview.platforms.edgechromium `
             --add-data "site;site" `
             --add-data "C:\Program Files\Tesseract-OCR;tesseract" `
             hvac_ocr_desktop.py
@@ -56,7 +54,7 @@ jobs:
           tag_name: latest
           name: HVAC OCR Studio (Windows Desktop)
           body: |
-            Native Windows desktop app using the exact same UI as the web app, powered by lossless vector-preserving OCR and native PDF Bookmarks.
+            Native Windows desktop app using the exact same UI as the web app, powered by lossless vector-preserving multi-core OCR and native PDF Bookmarks.
 
             **How to use:**
             1. Download `HVAC_OCR_Studio_Windows.zip` below.
