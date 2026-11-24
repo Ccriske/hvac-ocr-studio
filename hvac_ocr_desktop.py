@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-HVAC OCR Studio — Unified Native Desktop App (Zero .NET / Zero pythonnet)
+HVAC OCR Studio — Unified Native Desktop App (Async Live-Progress Server)
 =========================================================================
-Starts a local-only HTTP server on 127.0.0.1 serving `site/index.html` and
-opens it in a borderless native Edge/Chrome app window (`--app=...`).
-All OCR and lossless PDF bookmarking run on the native multi-core C++
-Tesseract + pypdf engine via `/api/process`.
+Starts a local HTTP server on 127.0.0.1 serving `site/index.html` inside a
+borderless Edge/Chrome app window (`--app=...`), with async background OCR
+jobs, live page-by-page progress polling, and real Cancel support.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-import multiprocessing
 import os
 import shutil
 import socket
@@ -20,6 +18,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -81,10 +81,94 @@ def find_chromium_browser() -> str | None:
     return None
 
 
-def make_handler(html_path: Path):
+class JobStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict] = {}
+
+    def start_job(self, filename: str, raw_pdf: bytes) -> str:
+        job_id = uuid.uuid4().hex[:12]
+        cancel_event = threading.Event()
+        with self._lock:
+            self._jobs[job_id] = {
+                "status": "running",
+                "pct": 2,
+                "message": "Starting native OCR...",
+                "started_at": time.time(),
+                "error": None,
+                "result": None,
+                "cancel_event": cancel_event,
+            }
+
+        def _worker() -> None:
+            try:
+                safe_name = Path(filename).name or "document.pdf"
+                with tempfile.TemporaryDirectory(prefix="hvac_ocr_") as td:
+                    in_path = Path(td) / safe_name
+                    out_path = Path(td) / f"{in_path.stem}_searchable.pdf"
+                    in_path.write_bytes(raw_pdf)
+
+                    def _on_prog(pct: int, msg: str) -> None:
+                        with self._lock:
+                            if job_id in self._jobs:
+                                self._jobs[job_id]["pct"] = pct
+                                self._jobs[job_id]["message"] = msg
+
+                    report = core.process_pdf_lossless(
+                        input_pdf=in_path,
+                        output_pdf=out_path,
+                        progress_cb=_on_prog,
+                        cancel_event=cancel_event,
+                    )
+                    report["file_name"] = safe_name
+                    report["pdf_base64"] = base64.b64encode(out_path.read_bytes()).decode("ascii")
+
+                with self._lock:
+                    self._jobs[job_id]["status"] = "done"
+                    self._jobs[job_id]["pct"] = 100
+                    self._jobs[job_id]["message"] = "Complete"
+                    self._jobs[job_id]["result"] = report
+            except Exception as exc:
+                with self._lock:
+                    self._jobs[job_id]["status"] = "error"
+                    self._jobs[job_id]["error"] = str(exc)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return job_id
+
+    def get_status(self, job_id: str) -> Optional[dict]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            return {
+                "status": job["status"],
+                "pct": job["pct"],
+                "message": job["message"],
+                "elapsed_sec": round(time.time() - job["started_at"], 1),
+                "error": job["error"],
+            }
+
+    def pop_result(self, job_id: str) -> Optional[dict]:
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+            if not job:
+                return None
+            return job.get("result")
+
+    def cancel(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return False
+            job["cancel_event"].set()
+            return True
+
+
+def make_handler(html_path: Path, jobs: JobStore):
     class HvacRequestHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:
-            pass  # Quiet console logs
+            pass
 
         def _send_json(self, payload: dict, status: int = 200) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -108,30 +192,39 @@ def make_handler(html_path: Path):
             if self.path == "/api/health":
                 self._send_json({"ok": True, "engine": "native"})
                 return
+            if self.path.startswith("/api/status/"):
+                job_id = self.path.split("/api/status/", 1)[1]
+                st = jobs.get_status(job_id)
+                if not st:
+                    self._send_json({"error": "Job not found"}, status=404)
+                else:
+                    self._send_json(st)
+                return
+            if self.path.startswith("/api/result/"):
+                job_id = self.path.split("/api/result/", 1)[1]
+                res = jobs.pop_result(job_id)
+                if not res:
+                    self._send_json({"error": "Result not ready"}, status=404)
+                else:
+                    self._send_json(res)
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
-            if self.path == "/api/process":
+            if self.path == "/api/start":
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     raw_pdf = self.rfile.read(length)
                     raw_name = unquote(self.headers.get("X-Filename", "document.pdf"))
-                    safe_name = Path(raw_name).name or "document.pdf"
-
-                    with tempfile.TemporaryDirectory(prefix="hvac_ocr_") as td:
-                        in_path = Path(td) / safe_name
-                        out_path = Path(td) / f"{in_path.stem}_searchable.pdf"
-                        in_path.write_bytes(raw_pdf)
-
-                        report = core.process_pdf_lossless(
-                            input_pdf=in_path,
-                            output_pdf=out_path,
-                        )
-                        report["file_name"] = safe_name
-                        report["pdf_base64"] = base64.b64encode(out_path.read_bytes()).decode("ascii")
-                    self._send_json(report, status=200)
+                    job_id = jobs.start_job(raw_name, raw_pdf)
+                    self._send_json({"job_id": job_id}, status=202)
                 except Exception as exc:
                     self._send_json({"error": str(exc)}, status=500)
+                return
+            if self.path.startswith("/api/cancel/"):
+                job_id = self.path.split("/api/cancel/", 1)[1]
+                jobs.cancel(job_id)
+                self._send_json({"cancelled": True})
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -145,8 +238,9 @@ def main() -> None:
     if not html_file.exists():
         html_file = base / "index.html"
 
+    jobs = JobStore()
     port = find_free_port()
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(html_file))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(html_file, jobs))
     url = f"http://127.0.0.1:{port}/"
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -177,5 +271,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     main()

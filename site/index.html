@@ -628,8 +628,8 @@
 
         try {
           if (isDesktopNative()) {
-            updateProgress(25, 'Running native multi-core lossless OCR...');
-            const resp = await fetch('/api/process', {
+            updateProgress(3, 'Uploading to local multi-core engine...');
+            const startResp = await fetch('/api/start', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/pdf',
@@ -637,8 +637,29 @@
               },
               body: state.pdfBytes
             });
-            const rep = await resp.json();
-            if (!resp.ok || rep.error) throw new Error(rep.error || 'Native OCR failed');
+            const startData = await startResp.json();
+            if (!startResp.ok || !startData.job_id) throw new Error(startData.error || 'Could not start OCR job');
+            state.activeJobId = startData.job_id;
+
+            while (true) {
+              await new Promise((res) => setTimeout(res, 450));
+              if (state.cancelRequested) {
+                await fetch(`/api/cancel/${state.activeJobId}`, { method: 'POST' }).catch(() => {});
+                throw new Error('Cancelled.');
+              }
+              const stResp = await fetch(`/api/status/${state.activeJobId}`);
+              const st = await stResp.json();
+              if (!stResp.ok) throw new Error(st.error || 'Status check failed');
+              updateProgress(st.pct || 5, `${st.message} (${st.elapsed_sec}s)`);
+              if (st.status === 'error') throw new Error(st.error || 'Native OCR failed');
+              if (st.status === 'done') break;
+            }
+
+            updateProgress(98, 'Loading bookmarked PDF...');
+            const resResp = await fetch(`/api/result/${state.activeJobId}`);
+            const rep = await resResp.json();
+            state.activeJobId = null;
+            if (!resResp.ok || rep.error) throw new Error(rep.error || 'Could not retrieve OCR result');
             await hydrateFromNativeReport(rep);
             return;
           }

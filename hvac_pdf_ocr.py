@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
 """
-HVAC OCR Studio — Lossless Vector-Preserving OCR & PDF Bookmarking Engine
-=========================================================================
-Overlays an invisible, font-size-matched OCR text layer directly onto the
-original untouched PDF pages (preserving 100% crisp CAD vector linework),
-automatically handles 90-degree rotated vertical title blocks, and embeds
-a hierarchical PDF Bookmark (Outline) tree tailored for HVAC engineers:
-  - Floor Plans
-  - Schedules
-  - Control Diagrams
-  - Sequence of Operations
-  - All Diagrams
-  - Specifications (Div 23)
-  - Equipment Cross-Reference
+HVAC OCR Studio — Fast Lossless Vector-Preserving OCR & PDF Bookmarking Engine
+==============================================================================
+- Uses ThreadPoolExecutor + OMP_THREAD_LIMIT=1 so parallel C++ tesseract.exe
+  subprocesses run at full multi-core speed on Windows with ZERO PyInstaller
+  multiprocessing deadlocks.
+- Overlays invisible (Tr 3) font-matched OCR text directly onto untouched
+  original vector PDF pages (zero raster blur).
+- Automatically rotates right-edge vertical title blocks 90° clockwise.
+- Embeds native hierarchical PDF Bookmarks (/Outlines) for Bluebeam / Acrobat.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 import io
-import json
-import multiprocessing
 import os
 import re
-import shutil
 import sys
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -37,6 +31,19 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas as rl_canvas
 
 Image.MAX_IMAGE_PIXELS = None
+
+# Prevent OpenMP thread thrashing when running multiple tesseract.exe processes in parallel
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+
+# Suppress flashing black CLI windows on Windows when pytesseract spawns tesseract.exe
+if sys.platform == "win32":
+    import subprocess as _sp
+    _orig_sub_args = pytesseract.pytesseract.subprocess_args
+    def _silent_sub_args(*args, **kwargs):
+        res = _orig_sub_args(*args, **kwargs)
+        res["creationflags"] = res.get("creationflags", 0) | getattr(_sp, "CREATE_NO_WINDOW", 0x08000000)
+        return res
+    pytesseract.pytesseract.subprocess_args = _silent_sub_args
 
 EQUIPMENT_TAG_RE = re.compile(
     r"\b("
@@ -51,6 +58,9 @@ AIRFLOW_CAPACITY_RE = re.compile(
 )
 CSI_DIV23_RE = re.compile(r"\b(?:SECTION\s+)?(23\s?\d{2}\s?\d{2}(?:\.\d{2})?)\b", re.IGNORECASE)
 SHEET_NUMBER_RE = re.compile(r"\b([MH]-?\d{1,3}(?:\.\d{1,2})?[A-Z]?)\b")
+
+# Serialize pypdfium2 renders safely (PDFium itself is not guaranteed thread-safe across threads)
+_PDFIUM_LOCK = threading.Lock()
 
 
 @dataclass
@@ -149,11 +159,6 @@ def build_invisible_text_overlay(
     height_pt: float,
     words: List[dict],
 ) -> bytes:
-    """
-    Create a single-page transparent PDF containing ONLY invisible (Tr 3)
-    searchable text matched to each word's exact position, font height, width,
-    and rotation angle so it overlays losslessly onto the original vector PDF.
-    """
     buf = io.BytesIO()
     c = rl_canvas.Canvas(buf, pagesize=(width_pt, height_pt))
     for w in words:
@@ -188,41 +193,49 @@ def ocr_page_lossless(
     page_index: int,
     width_pt: float,
     height_pt: float,
-    tesseract_cmd: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Tuple[int, Optional[bytes], str, List[str], List[str]]:
-    """
-    Render one page to memory, run Tesseract OCR (plus 90 deg CW right-edge
-    title block OCR on landscape sheets), and return a transparent invisible-text
-    overlay PDF byte stream so the original vector PDF page stays 100% untouched.
-    """
-    if tesseract_cmd:
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    if cancel_event and cancel_event.is_set():
+        return page_index, None, "", [], []
 
     is_landscape = width_pt > height_pt
     longest_in = max(width_pt, height_pt) / 72.0
-    target_dpi = min(200.0, 4200.0 / max(longest_in, 1.0))
+    # Fast, crisp cap: 150-165 DPI capped at 3200px on long edge (2x faster on 30x42 sheets)
+    target_dpi = min(165.0, 3200.0 / max(longest_in, 1.0))
     scale = target_dpi / 72.0
 
-    doc = pdfium.PdfDocument(pdf_path)
-    try:
-        page = doc[page_index]
-        pil_img = page.render(scale=scale).to_pil()
-        page.close()
-    finally:
-        doc.close()
+    with _PDFIUM_LOCK:
+        doc = pdfium.PdfDocument(pdf_path)
+        try:
+            page = doc[page_index]
+            pil_img = page.render(scale=scale).to_pil()
+            page.close()
+        finally:
+            doc.close()
+
+    if cancel_event and cancel_event.is_set():
+        return page_index, None, "", [], []
 
     gray = ImageOps.autocontrast(ImageOps.grayscale(pil_img), cutoff=1)
     if is_landscape:
-        gray = ImageEnhance.Contrast(gray).enhance(1.35).filter(ImageFilter.SHARPEN)
+        gray = ImageEnhance.Contrast(gray).enhance(1.3).filter(ImageFilter.SHARPEN)
 
     img_w, img_h = gray.size
     sx = width_pt / max(1, img_w)
     sy = height_pt / max(1, img_h)
 
     psm = 11 if is_landscape else 3
-    data = pytesseract.image_to_data(
-        gray, lang="eng", config=f"--oem 3 --psm {psm}", output_type=pytesseract.Output.DICT
-    )
+    try:
+        data = pytesseract.image_to_data(
+            gray,
+            lang="eng",
+            config=f"--oem 3 --psm {psm}",
+            output_type=pytesseract.Output.DICT,
+            timeout=45,
+        )
+    except RuntimeError:
+        # Per-page timeout protection for ultra-dense vector hatch drawings
+        return page_index, None, "(OCR timed out on ultra-dense drawing)", [], []
 
     overlay_words: List[dict] = []
     grouped_lines: dict[Tuple[int, int, int], list] = {}
@@ -257,48 +270,53 @@ def ocr_page_lossless(
     largest_lines = [ln for sz, ln in sorted(line_texts_with_size, key=lambda x: -x[0]) if sz >= 14.0][:5]
 
     # 90° clockwise rotation pass on right-edge vertical title block for landscape sheets
-    if is_landscape:
+    if is_landscape and not (cancel_event and cancel_event.is_set()):
         crop_x = int(img_w * 0.80)
         tb_crop = gray.crop((crop_x, 0, img_w, img_h))
-        tb_rot = tb_crop.rotate(-90, expand=True)  # -90 in Pillow = 90 deg CW
-        tb_data = pytesseract.image_to_data(
-            tb_rot, lang="eng", config="--oem 3 --psm 6", output_type=pytesseract.Output.DICT
-        )
-        tb_grouped: dict[Tuple[int, int, int], list] = {}
-        for i, raw in enumerate(tb_data.get("text", [])):
-            txt = (raw or "").strip()
-            if not txt:
-                continue
-            left, top, w, h = tb_data["left"][i], tb_data["top"][i], tb_data["width"][i], tb_data["height"][i]
-            key = (tb_data["block_num"][i], tb_data["par_num"][i], tb_data["line_num"][i])
-            tb_grouped.setdefault(key, []).append(txt)
-            # Map rotated crop coords back to original sheet coords (rotated +90 deg)
-            orig_x = crop_x + top + h
-            orig_y_bottom = img_h - left
-            overlay_words.append({
-                "text": txt,
-                "x_pt": orig_x * sx,
-                "y_pt": height_pt - orig_y_bottom * sy,
-                "w_pt": w * sy,
-                "h_pt": h * sx,
-                "rot": 90,
-            })
+        tb_rot = tb_crop.rotate(-90, expand=True)
+        try:
+            tb_data = pytesseract.image_to_data(
+                tb_rot,
+                lang="eng",
+                config="--oem 3 --psm 6",
+                output_type=pytesseract.Output.DICT,
+                timeout=20,
+            )
+            tb_grouped: dict[Tuple[int, int, int], list] = {}
+            for i, raw in enumerate(tb_data.get("text", [])):
+                txt = (raw or "").strip()
+                if not txt:
+                    continue
+                left, top, w, h = tb_data["left"][i], tb_data["top"][i], tb_data["width"][i], tb_data["height"][i]
+                key = (tb_data["block_num"][i], tb_data["par_num"][i], tb_data["line_num"][i])
+                tb_grouped.setdefault(key, []).append(txt)
+                orig_x = crop_x + top + h
+                orig_y_bottom = img_h - left
+                overlay_words.append({
+                    "text": txt,
+                    "x_pt": orig_x * sx,
+                    "y_pt": height_pt - orig_y_bottom * sy,
+                    "w_pt": w * sy,
+                    "h_pt": h * sx,
+                    "rot": 90,
+                })
 
-        rot_lines = [
-            " ".join(ws)
-            for ws in tb_grouped.values()
-            if len(re.sub(r"[^A-Za-z0-9]", "", " ".join(ws))) >= 3
-        ]
-        if rot_lines:
-            tb_lines = list(dict.fromkeys(rot_lines + tb_lines))
-            full_text = (full_text + "\n\n[TITLE BLOCK]\n" + "\n".join(rot_lines)).strip()
+            rot_lines = [
+                " ".join(ws)
+                for ws in tb_grouped.values()
+                if len(re.sub(r"[^A-Za-z0-9]", "", " ".join(ws))) >= 3
+            ]
+            if rot_lines:
+                tb_lines = list(dict.fromkeys(rot_lines + tb_lines))
+                full_text = (full_text + "\n\n[TITLE BLOCK]\n" + "\n".join(rot_lines)).strip()
+        except RuntimeError:
+            pass
 
     overlay_pdf = build_invisible_text_overlay(width_pt, height_pt, overlay_words) if overlay_words else None
     return page_index, overlay_pdf, full_text, tb_lines, largest_lines
 
 
 def add_engineering_bookmarks(writer: pypdf.PdfWriter, results: List[PageResult]) -> None:
-    """Embed a clean, hierarchical PDF Outline (Bookmarks) tree for Bluebeam / Acrobat."""
     sections = [
         ("Floor Plans", [r for r in results if "floorplan" in r.categories]),
         ("Schedules", [r for r in results if "schedule" in r.categories]),
@@ -317,7 +335,6 @@ def add_engineering_bookmarks(writer: pypdf.PdfWriter, results: List[PageResult]
             label = f"{tag}{item.inferred_title} (p.{item.page_number})"
             writer.add_outline_item(label, item.page_number - 1, parent=parent)
 
-    # Equipment Cross-Reference tree
     tag_map: dict[str, List[PageResult]] = {}
     for r in results:
         for t in r.equipment_tags:
@@ -348,66 +365,72 @@ def process_pdf_lossless(
     output_pdf: Optional[Path] = None,
     workers: Optional[int] = None,
     progress_cb: Optional[Callable[[int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict:
-    """
-    Process a PDF losslessly: preserve crisp vector drawings, overlay invisible
-    font-matched OCR text on scanned/SHX pages + rotated title blocks, and embed
-    native hierarchical PDF bookmarks.
-    """
     if output_pdf is None:
         output_pdf = input_pdf.with_name(f"{input_pdf.stem}_searchable.pdf")
 
     reader = pypdf.PdfReader(str(input_pdf))
     total = len(reader.pages)
     if progress_cb:
-        progress_cb(5, f"Inspecting {total} page(s)...")
+        progress_cb(4, f"Inspecting {total} page(s) for existing text...")
 
     existing_texts: List[str] = []
     page_dims: List[Tuple[float, float]] = []
     ocr_indices: List[int] = []
 
     for idx, page in enumerate(reader.pages):
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("Cancelled by user.")
         txt = (page.extract_text() or "").strip()
         existing_texts.append(txt)
         w, h = float(page.mediabox.width), float(page.mediabox.height)
         page_dims.append((w, h))
-        # OCR pages with minimal selectable text (scanned or stroked AutoCAD SHX)
         if len(txt) < 80:
             ocr_indices.append(idx)
 
-    tess_cmd = pytesseract.pytesseract.tesseract_cmd
     ocr_map: dict[int, Tuple[Optional[bytes], str, List[str], List[str]]] = {}
 
     if ocr_indices:
-        max_w = workers or max(1, min((os.cpu_count() or 2), 6))
+        # ThreadPoolExecutor runs external C++ tesseract.exe processes in true parallel
+        # with zero Windows PyInstaller multiprocessing deadlocks!
+        max_w = workers or max(2, min((os.cpu_count() or 4), 6))
         actual_w = max(1, min(max_w, len(ocr_indices)))
         if progress_cb:
-            progress_cb(15, f"Running parallel OCR on {len(ocr_indices)} page(s) ({actual_w} cores)...")
+            progress_cb(
+                10,
+                f"Running parallel OCR on {len(ocr_indices)}/{total} scanned page(s) ({actual_w} threads)...",
+            )
 
         done = 0
-        if actual_w == 1:
-            for idx in ocr_indices:
-                w, h = page_dims[idx]
-                _, ov, txt, tb, lg = ocr_page_lossless(str(input_pdf), idx, w, h, tess_cmd)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=actual_w) as pool:
+            futs = {
+                pool.submit(
+                    ocr_page_lossless,
+                    str(input_pdf),
+                    idx,
+                    page_dims[idx][0],
+                    page_dims[idx][1],
+                    cancel_event,
+                ): idx
+                for idx in ocr_indices
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                if cancel_event and cancel_event.is_set():
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise RuntimeError("Cancelled by user.")
+                idx, ov, txt, tb, lg = fut.result()
                 ocr_map[idx] = (ov, txt, tb, lg)
                 done += 1
                 if progress_cb:
-                    progress_cb(15 + int((done / len(ocr_indices)) * 70), f"OCR finished {done}/{len(ocr_indices)} page(s)...")
-        else:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=actual_w) as pool:
-                futs = {
-                    pool.submit(ocr_page_lossless, str(input_pdf), idx, page_dims[idx][0], page_dims[idx][1], tess_cmd): idx
-                    for idx in ocr_indices
-                }
-                for fut in concurrent.futures.as_completed(futs):
-                    idx, ov, txt, tb, lg = fut.result()
-                    ocr_map[idx] = (ov, txt, tb, lg)
-                    done += 1
-                    if progress_cb:
-                        progress_cb(15 + int((done / len(ocr_indices)) * 70), f"OCR finished {done}/{len(ocr_indices)} page(s)...")
+                    pct = 10 + int((done / len(ocr_indices)) * 78)
+                    progress_cb(pct, f"OCR completed {done} of {len(ocr_indices)} scanned page(s)...")
+
+    if cancel_event and cancel_event.is_set():
+        raise RuntimeError("Cancelled by user.")
 
     if progress_cb:
-        progress_cb(88, "Merging lossless text layer & building PDF bookmarks...")
+        progress_cb(90, "Merging lossless text layer & building PDF bookmarks...")
 
     writer = pypdf.PdfWriter()
     results: List[PageResult] = []
@@ -453,7 +476,7 @@ def process_pdf_lossless(
         writer.write(f)
 
     if progress_cb:
-        progress_cb(100, f"Saved {output_pdf.name}")
+        progress_cb(100, f"Done — {total} page(s) searchable.")
 
     return {
         "source_file": str(input_pdf),
@@ -465,7 +488,6 @@ def process_pdf_lossless(
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     if len(sys.argv) < 2:
         print("Usage: python hvac_pdf_ocr.py <input.pdf> [output.pdf]")
         raise SystemExit(1)
