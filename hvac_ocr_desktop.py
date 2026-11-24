@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """
-HVAC OCR Studio — Unified Native Desktop App (pywebview + Lossless Native OCR)
-==============================================================================
-Renders the EXACT SAME sleek HTML UI (`site/index.html`) inside a native
-Windows WebView2 window while running native multi-core C++ Tesseract +
-lossless vector PDF overlay + native PDF bookmarks under the hood.
+HVAC OCR Studio — Unified Native Desktop App (Zero .NET / Zero pythonnet)
+=========================================================================
+Starts a local-only HTTP server on 127.0.0.1 serving `site/index.html` and
+opens it in a borderless native Edge/Chrome app window (`--app=...`).
+All OCR and lossless PDF bookmarking run on the native multi-core C++
+Tesseract + pypdf engine via `/api/process`.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import multiprocessing
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
+import threading
+import webbrowser
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytesseract
-import webview
-
 import hvac_pdf_ocr as core
 
 
@@ -51,65 +58,84 @@ def configure_tesseract() -> str | None:
     return None
 
 
-class DesktopApi:
-    """Bridge exposed to window.pywebview.api inside site/index.html."""
+def find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
 
-    def __init__(self) -> None:
-        self.last_output_pdf: Path | None = None
-        self.window: webview.Window | None = None
 
-    def _emit_progress(self, pct: int, msg: str) -> None:
-        if self.window:
-            safe_msg = msg.replace("\\", "\\\\").replace("'", "\\'")
-            self.window.evaluate_js(
-                f"window.__onNativeProgress && window.__onNativeProgress({int(pct)}, '{safe_msg}');"
-            )
+def find_chromium_browser() -> str | None:
+    candidates = [
+        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    for name in ("msedge", "chrome", "google-chrome", "chromium"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
-    def pick_and_process_pdf(self) -> dict | None:
-        if not self.window:
-            return None
-        chosen = self.window.create_file_dialog(
-            webview.OPEN_DIALOG,
-            allow_multiple=False,
-            file_types=("PDF Files (*.pdf)",),
-        )
-        if not chosen:
-            return None
-        return self.process_local_path(chosen[0])
 
-    def process_pdf_base64(self, filename: str, b64_data: str) -> dict:
-        tmp_dir = Path(tempfile.mkdtemp(prefix="hvac_ocr_"))
-        in_path = tmp_dir / Path(filename).name
-        in_path.write_bytes(base64.b64decode(b64_data))
-        return self.process_local_path(str(in_path))
+def make_handler(html_path: Path):
+    class HvacRequestHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:
+            pass  # Quiet console logs
 
-    def process_local_path(self, path_str: str) -> dict:
-        in_path = Path(path_str)
-        out_path = in_path.with_name(f"{in_path.stem}_searchable.pdf")
-        report = core.process_pdf_lossless(
-            input_pdf=in_path,
-            output_pdf=out_path,
-            progress_cb=self._emit_progress,
-        )
-        self.last_output_pdf = out_path
-        pdf_b64 = base64.b64encode(out_path.read_bytes()).decode("ascii")
-        report["file_name"] = in_path.name
-        report["pdf_base64"] = pdf_b64
-        return report
+        def _send_json(self, payload: dict, status: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
-    def save_searchable_pdf(self) -> dict:
-        if not self.window or not self.last_output_pdf or not self.last_output_pdf.exists():
-            return {"saved": False}
-        dest = self.window.create_file_dialog(
-            webview.SAVE_DIALOG,
-            save_filename=self.last_output_pdf.name,
-            file_types=("PDF Files (*.pdf)",),
-        )
-        if not dest:
-            return {"saved": False}
-        target = Path(dest if isinstance(dest, str) else dest[0])
-        shutil.copy2(self.last_output_pdf, target)
-        return {"saved": True, "path": str(target)}
+        def do_GET(self) -> None:
+            if self.path in ("/", "/index.html"):
+                body = html_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/api/health":
+                self._send_json({"ok": True, "engine": "native"})
+                return
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:
+            if self.path == "/api/process":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    raw_pdf = self.rfile.read(length)
+                    raw_name = unquote(self.headers.get("X-Filename", "document.pdf"))
+                    safe_name = Path(raw_name).name or "document.pdf"
+
+                    with tempfile.TemporaryDirectory(prefix="hvac_ocr_") as td:
+                        in_path = Path(td) / safe_name
+                        out_path = Path(td) / f"{in_path.stem}_searchable.pdf"
+                        in_path.write_bytes(raw_pdf)
+
+                        report = core.process_pdf_lossless(
+                            input_pdf=in_path,
+                            output_pdf=out_path,
+                        )
+                        report["file_name"] = safe_name
+                        report["pdf_base64"] = base64.b64encode(out_path.read_bytes()).decode("ascii")
+                    self._send_json(report, status=200)
+                except Exception as exc:
+                    self._send_json({"error": str(exc)}, status=500)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+    return HvacRequestHandler
 
 
 def main() -> None:
@@ -119,20 +145,37 @@ def main() -> None:
     if not html_file.exists():
         html_file = base / "index.html"
 
-    api = DesktopApi()
-    window = webview.create_window(
-        title="HVAC OCR Studio",
-        url=html_file.as_uri(),
-        js_api=api,
-        width=1240,
-        height=820,
-        min_size=(920, 620),
-    )
-    api.window = window
-    webview.start()
+    port = find_free_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(html_file))
+    url = f"http://127.0.0.1:{port}/"
+
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    browser = find_chromium_browser()
+    if browser:
+        profile_dir = tempfile.mkdtemp(prefix="hvac_ocr_win_")
+        try:
+            proc = subprocess.Popen([
+                browser,
+                f"--app={url}",
+                "--window-size=1280,840",
+                f"--user-data-dir={profile_dir}",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ])
+            proc.wait()
+        finally:
+            server.shutdown()
+            shutil.rmtree(profile_dir, ignore_errors=True)
+    else:
+        webbrowser.open(url)
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            server.shutdown()
 
 
 if __name__ == "__main__":
-    # Critical for PyInstaller on Windows so ProcessPoolExecutor never spawns duplicate windows!
     multiprocessing.freeze_support()
     main()

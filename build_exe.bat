@@ -6,7 +6,7 @@ echo   Building HVAC OCR Studio (Unified Windows Desktop App)
 echo ============================================================
 
 python -m pip install --upgrade pip
-python -m pip install pyinstaller pypdf pypdfium2 pytesseract pillow reportlab pywebview
+python -m pip install pyinstaller pypdf pypdfium2 pytesseract pillow reportlab
 
 set "TESS_DIR=C:\Program Files\Tesseract-OCR"
 if not exist "%TESS_DIR%\tesseract.exe" (
@@ -17,9 +17,7 @@ if exist "%TESS_DIR%\tesseract.exe" (
     echo Bundling Tesseract OCR from: %TESS_DIR%
     pyinstaller --noconfirm --onedir --windowed ^
         --name "HVAC_OCR_Studio" ^
-        --collect-all webview ^
         --collect-all pypdfium2 ^
-        --hidden-import webview.platforms.edgechromium ^
         --add-data "site;site" ^
         --add-data "%TESS_DIR%;tesseract" ^
         hvac_ocr_desktop.py
@@ -27,9 +25,7 @@ if exist "%TESS_DIR%\tesseract.exe" (
     echo [WARNING] Tesseract-OCR not found in Program Files.
     pyinstaller --noconfirm --onedir --windowed ^
         --name "HVAC_OCR_Studio" ^
-        --collect-all webview ^
         --collect-all pypdfium2 ^
-        --hidden-import webview.platforms.edgechromium ^
         --add-data "site;site" ^
         hvac_ocr_desktop.py
 )

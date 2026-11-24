@@ -627,6 +627,21 @@
         updateProgress(4, 'Reading PDF pages...');
 
         try {
+          if (isDesktopNative()) {
+            updateProgress(25, 'Running native multi-core lossless OCR...');
+            const resp = await fetch('/api/process', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/pdf',
+                'X-Filename': encodeURIComponent(fileName)
+              },
+              body: state.pdfBytes
+            });
+            const rep = await resp.json();
+            if (!resp.ok || rep.error) throw new Error(rep.error || 'Native OCR failed');
+            await hydrateFromNativeReport(rep);
+            return;
+          }
           const pdfDoc = await pdfjsLib.getDocument({ data: state.pdfBytes.slice() }).promise;
           state.pdfDocProxy = pdfDoc;
           const total = pdfDoc.numPages;
@@ -1151,14 +1166,10 @@
         return (state.fileName || 'hvac_document').replace(/\.pdf$/i, '');
       }
 
-      // Desktop pywebview native bridge (exact same UI, powered by native multi-core C++ OCR)
+      // Local native desktop server bridge (served by HVAC_OCR_Studio.exe on 127.0.0.1)
       function isDesktopNative() {
-        return Boolean(window.pywebview && window.pywebview.api);
+        return window.location.hostname === '127.0.0.1';
       }
-
-      window.__onNativeProgress = function (pct, msg) {
-        updateProgress(pct, msg);
-      };
 
       async function hydrateFromNativeReport(rep) {
         if (!rep || !rep.pdf_base64) return;
@@ -1194,34 +1205,12 @@
         el.exportGroup.classList.add('flex');
         renderSidebar();
         renderWorkspace();
-        showToast(`Ready — ${state.results.length} page(s) searchable with native PDF bookmarks.`);
-      }
-
-      async function openFileSmart() {
-        if (isDesktopNative()) {
-          el.emptyState.classList.add('hidden');
-          el.workbench.classList.remove('hidden');
-          el.btnNewFile.classList.remove('hidden');
-          el.progressStrip.classList.remove('hidden');
-          updateProgress(5, 'Select a PDF to process with native multi-core OCR...');
-          const rep = await window.pywebview.api.pick_and_process_pdf();
-          if (rep) {
-            await hydrateFromNativeReport(rep);
-          } else {
-            el.progressStrip.classList.add('hidden');
-            if (!state.results.length) {
-              el.workbench.classList.add('hidden');
-              el.emptyState.classList.remove('hidden');
-            }
-          }
-          return;
-        }
-        el.pdfInput.click();
+        showToast(`Done — ${state.results.length} page(s) searchable with native PDF bookmarks.`);
       }
 
       // Wire events
-      el.dropZone.addEventListener('click', openFileSmart);
-      el.btnNewFile.addEventListener('click', openFileSmart);
+      el.dropZone.addEventListener('click', () => el.pdfInput.click());
+      el.btnNewFile.addEventListener('click', () => el.pdfInput.click());
       el.pdfInput.addEventListener('change', async (e) => {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
@@ -1330,12 +1319,7 @@
         showToast('Copied extracted text.');
       });
 
-      el.btnDownloadPdf.addEventListener('click', async () => {
-        if (isDesktopNative()) {
-          const res = await window.pywebview.api.save_searchable_pdf();
-          if (res && res.saved) showToast(`Saved to ${res.path}`);
-          return;
-        }
+      el.btnDownloadPdf.addEventListener('click', () => {
         if (state.searchablePdfBytes) {
           triggerDownload(new Blob([state.searchablePdfBytes], { type: 'application/pdf' }), `${baseStem()}_searchable.pdf`);
         }
