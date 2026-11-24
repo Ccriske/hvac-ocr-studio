@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/35305163/README.md)
 # HVAC OCR Studio
 
 A zero-clutter, lossless OCR and PDF bookmarking tool built specifically for HVAC/mechanical engineering plans and Division 23 specification packages.
